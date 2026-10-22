@@ -1,0 +1,7 @@
+{
+  "name": "Public Domain Movies",
+  "version": 1,
+  "description": "Free-to-watch feature films from the Internet Archive",
+  "pluginClassName": "app.cloudstream.desktop.extensions.archiveorg.ArchiveOrgCatalog",
+  "requiresResources": false
+}

@@ -1,0 +1,9 @@
+# Workspace-local toolchain (JDK, Gradle distribution) — installed, not source.
+.toolchain/
+.tools/
+
+# Reference copy of upstream CloudStream. Its git history is kept out of this repository
+# (sources are committed so the build and GPL source correspondence work), and its GitHub
+# Actions must not run from here.
+src-cloudstream/.git/
+src-cloudstream/.github/
