@@ -130,7 +130,7 @@ class ExtensionHostTest {
 
             assertTrue(result.isFailure)
             assertTrue(result.exceptionOrNull()!!.message!!.contains("manifest.json"))
-            Files.notExists(dir.resolve("broken.jar"))
+            assertTrue(Files.notExists(dir.resolve("broken.jar")))
         }
     }
 

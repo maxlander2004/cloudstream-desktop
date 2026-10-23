@@ -72,7 +72,9 @@ object ExtensionHost {
         loadAll().let { result ->
             result.loaded.firstOrNull { it.file == target }
                 ?: run {
-                    Files.deleteIfExists(target)
+                    // Best effort: a cleanup problem must never mask why the archive was
+                    // rejected (on Windows the copy can be transiently locked).
+                    runCatching { Files.deleteIfExists(target) }
                     error(result.errors.firstOrNull { it.startsWith(target.fileName.toString()) }
                         ?: "${source.fileName} does not contain a loadable extension")
                 }
@@ -119,16 +121,24 @@ object ExtensionHost {
 
     private fun loadNative(jar: Path): LoadedExtension {
         val loader = URLClassLoader(arrayOf(jar.toUri().toURL()), Catalog::class.java.classLoader)
-        val manifest = loader.getResourceAsStream("manifest.json")?.use { stream ->
-            json.decodeFromString<PluginManifest>(stream.readBytes().decodeToString())
-        } ?: error("no manifest.json inside the archive")
+        return try {
+            val manifest = loader.getResourceAsStream("manifest.json")?.use { stream ->
+                json.decodeFromString<PluginManifest>(stream.readBytes().decodeToString())
+            } ?: error("no manifest.json inside the archive")
 
-        val instance = loader.loadClass(manifest.pluginClassName)
-            .getDeclaredConstructor()
-            .newInstance() as? Catalog
-            ?: error("${manifest.pluginClassName} does not implement Catalog")
+            val instance = loader.loadClass(manifest.pluginClassName)
+                .getDeclaredConstructor()
+                .newInstance() as? Catalog
+                ?: error("${manifest.pluginClassName} does not implement Catalog")
 
-        return LoadedExtension(manifest, instance, jar)
+            LoadedExtension(manifest, instance, jar)
+        } catch (t: Throwable) {
+            // The loader opens the archive to search it. Leaving it open after a failed load
+            // keeps the file locked — on Windows install() could then not remove the rejected
+            // copy. Successful loads keep the loader, since the catalog needs its classes.
+            runCatching { loader.close() }
+            throw t
+        }
     }
 
     /** One CloudStream plugin can register several providers; each becomes its own catalog. */

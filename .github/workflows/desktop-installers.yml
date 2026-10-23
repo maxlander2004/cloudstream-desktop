@@ -10,9 +10,11 @@ on:
         required: false
         default: ""
   push:
-    paths:
-      - "cloudstream-desktop/**"
-      - ".github/workflows/desktop-installers.yml"
+    branches:
+      - "**"
+    # No `paths` filter: a tag push must always run so its installers reach the release.
+    tags:
+      - "v*"
   # Publishing a GitHub Release builds the installers and attaches them to that release so
   # they are directly downloadable from its page. (A `paths` filter never fires for tag
   # pushes, which is why releases use their own event instead of the push trigger.)
@@ -110,10 +112,11 @@ jobs:
           path: cloudstream-desktop/build/compose/binaries/main/deb/*.deb
 
   # Attaches the Windows installers to a GitHub Release. A release event reuses the
-  # triggering release; a dispatch run with `release_tag` sets one up itself (the
+  # triggering release; a `v*` tag push does the same for that tag's release (created if
+  # missing); a dispatch run with `release_tag` sets one up itself (the
   # workflow token has the permissions the user's own token may not).
   release:
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    if: github.event_name == 'release' || github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: windows
     runs-on: ubuntu-latest
     steps:
@@ -125,7 +128,7 @@ jobs:
       - name: Publish installers to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "CloudStream Desktop $TAG" --generate-notes --verify-tag
