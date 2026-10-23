@@ -4,6 +4,11 @@ name: Build desktop installers
 # there rather than cross-compiled.
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish the built installers to this tag's release (created if missing)"
+        required: false
+        default: ""
   push:
     paths:
       - "cloudstream-desktop/**"
@@ -104,9 +109,11 @@ jobs:
           if-no-files-found: error
           path: cloudstream-desktop/build/compose/binaries/main/deb/*.deb
 
-  # Attaches the Windows installers to the GitHub Release that triggered this run.
+  # Attaches the Windows installers to a GitHub Release. A release event reuses the
+  # triggering release; a dispatch run with `release_tag` sets one up itself (the
+  # workflow token has the permissions the user's own token may not).
   release:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: windows
     runs-on: ubuntu-latest
     steps:
@@ -115,11 +122,14 @@ jobs:
           name: cloudstream-windows
           path: installers
 
-      - name: Upload installers to the release
+      - name: Publish installers to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
         run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "CloudStream Desktop $TAG" --generate-notes --verify-tag
+          fi
           files="$(find installers -type f \( -name '*.msi' -o -name '*.exe' \))"
           if [ -z "$files" ]; then
             echo "::error::No installers found in the artifact"
