@@ -27,7 +27,20 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # Two legs: x64 (windows-latest) and ARM64 (windows-11-arm). An x64 installer refuses to
+    # start on ARM64 Windows machines whose emulation layer does not cover it, showing
+    # "This app can't run on your PC", so each architecture gets its own installer.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: cloudstream-windows
+            suffix: ""
+          - os: windows-11-arm
+            artifact: cloudstream-windows-arm64
+            suffix: "-arm64"
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: cloudstream-desktop
@@ -74,13 +87,24 @@ jobs:
         run: ./gradlew :packageMsi :packageExe --console=plain
         shell: bash
 
+      # Both legs upload to the same release, so the ARM64 installers get their own names.
+      - name: Suffix ARM64 installers
+        if: matrix.suffix != ''
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for f in build/compose/binaries/main/msi/*.msi; do mv "$f" "${f%.msi}${{ matrix.suffix }}.msi"; done
+          for f in build/compose/binaries/main/exe/*.exe; do mv "$f" "${f%.exe}${{ matrix.suffix }}.exe"; done
+          ls -l build/compose/binaries/main/msi build/compose/binaries/main/exe
+
       - name: Build example extension
+        if: matrix.suffix == ''
         run: ./gradlew :extensions:archive-org:jar --console=plain
         shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cloudstream-windows
+          name: ${{ matrix.artifact }}
           if-no-files-found: error
           path: |
             cloudstream-desktop/build/compose/binaries/main/msi/*.msi
@@ -122,7 +146,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: cloudstream-windows
+          pattern: cloudstream-windows*
+          merge-multiple: true
           path: installers
 
       - name: Publish installers to the release
