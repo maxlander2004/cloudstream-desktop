@@ -143,3 +143,18 @@ jobs:
           # Word splitting is intended: gh takes each file as its own argument.
           # shellcheck disable=SC2086
           gh release upload "$TAG" $files --clobber
+
+      # The tag can be re-pushed (e.g. after a version fix), leaving assets named after an
+      # older build on the release; remove anything this build did not just upload.
+      - name: Remove stale assets from earlier builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_type == 'tag' && github.ref.name || inputs.release_tag }}
+        run: |
+          keep="$(find installers -type f \( -name '*.msi' -o -name '*.exe' \) -printf '%f\n')"
+          gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
+            if ! printf '%s\n' "$keep" | grep -qxF "$name"; then
+              gh release delete-asset "$TAG" "$name" -y && echo "Removed stale asset $name"
+            fi
+          done
