@@ -150,7 +150,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_type == 'tag' && github.ref.name || inputs.release_tag }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
         run: |
           keep="$(find installers -type f \( -name '*.msi' -o -name '*.exe' \) -printf '%f\n')"
           gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
