@@ -31,6 +31,11 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    // Rail and settings icons matching the original app's UI.
+    implementation(compose.materialIconsExtended)
+    // Poster artwork on the home/search grids, like the Android app's poster cards.
+    implementation("io.coil-kt.coil3:coil-compose:3.2.0")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")

@@ -3,13 +3,18 @@ package app.cloudstream.desktop
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
 import app.cloudstream.desktop.api.StreamLink
+import app.cloudstream.desktop.core.AppUpdates
+import app.cloudstream.desktop.core.Backup
+import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.IptvSource
+import app.cloudstream.desktop.core.Settings
 import java.nio.file.Files
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -182,5 +187,140 @@ class ExtensionHostTest {
             out.write(classBytes)
             out.closeEntry()
         }
+    }
+}
+
+class AppUpdateTest {
+    @Test
+    fun `compares versions segment by segment`() {
+        assertTrue(AppUpdates.isNewer("1.2.0", "1.1.0"))
+        assertTrue(AppUpdates.isNewer("1.1.1", "1.1.0"))
+        assertTrue(AppUpdates.isNewer("2.0.0", "1.9.9"))
+        assertFalse(AppUpdates.isNewer("1.1.0", "1.1.0"))
+        assertFalse(AppUpdates.isNewer("1.0.9", "1.1.0"))
+    }
+}
+
+class DownloadNamingTest {
+    @Test
+    fun `uses the file name from the url when it has an extension`() {
+        assertEquals(
+            "movie.mp4",
+            DownloadManager.guessFileName("Some Title", "https://cdn.example/path/movie.mp4?token=1"),
+        )
+    }
+
+    @Test
+    fun `falls back to a cleaned title when the url has no usable name`() {
+        assertEquals(
+            "Some_ Title.mp4",
+            DownloadManager.guessFileName("Some: Title?", "https://cdn.example/stream"),
+        )
+    }
+
+    @Test
+    fun `defaults to mp4 when the url carries no extension`() {
+        assertEquals(
+            "Nice_ Title.mp4",
+            DownloadManager.guessFileName("Nice: Title", "https://cdn.example/v/playlist?id=9"),
+        )
+    }
+}
+
+/** The Updates and Backup settings' new keys and the backup round trip. */
+class SettingsBackupTest {
+    private fun withTempHome(block: (java.nio.file.Path) -> Unit) {
+        val previous = System.getProperty("user.home")
+        System.setProperty("user.home", Files.createTempDirectory("cs-settings-home").toString())
+        try {
+            block(java.nio.file.Paths.get(System.getProperty("user.home")))
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+    }
+
+    @Test
+    fun `round-trips the parity settings through the properties file`() = withTempHome { _ ->
+        val settings = Settings()
+        settings.parallelDownloads = 7
+        settings.concurrentConnections = 5
+        settings.preferredMedia = listOf("movie", "anime")
+        settings.providerLanguages = listOf("en", "de")
+        settings.posterSize = 4
+        settings.posterTitleUnder = false
+        settings.advancedSearch = false
+        settings.appTheme = "light"
+        settings.nsfwEnabled = true
+        settings.autoPluginUpdates = false
+        settings.autoDownloadPlugins = true
+        settings.githubProxy = true
+        settings.cloneSite = "https://a.example=https://b.example"
+        settings.doh = "cloudflare"
+
+        val reloaded = Settings()
+        assertEquals(7, reloaded.parallelDownloads)
+        assertEquals(5, reloaded.concurrentConnections)
+        assertEquals(listOf("MOVIE", "ANIME"), reloaded.preferredMedia)
+        assertEquals(listOf("en", "de"), reloaded.providerLanguages)
+        assertEquals(4, reloaded.posterSize)
+        assertFalse(reloaded.posterTitleUnder)
+        assertFalse(reloaded.advancedSearch)
+        assertEquals("light", reloaded.appTheme)
+        assertTrue(reloaded.nsfwEnabled)
+        assertFalse(reloaded.autoPluginUpdates)
+        assertTrue(reloaded.autoDownloadPlugins)
+        assertTrue(reloaded.githubProxy)
+        assertEquals("https://a.example=https://b.example", reloaded.cloneSite)
+        assertEquals("cloudflare", reloaded.doh)
+    }
+
+    @Test
+    fun `backup restores settings and extensions into a fresh home`() {
+        withTempHome { _ ->
+            val settings = Settings()
+            settings.playerCommand = "mpv --fs"
+            settings.parallelDownloads = 9
+            val extensionsDir = ExtensionHost.ensureExtensionsDir()
+            Files.writeString(extensionsDir.resolve("demo.cs3"), "not a real archive")
+
+            val zip = Backup.create(
+                Files.createTempDirectory("cs-backup").toString(),
+                extensionsDir,
+            )
+            assertTrue(Files.isRegularFile(zip))
+
+            // A different machine: empty home, then restore.
+            val other = Files.createTempDirectory("cs-restore-home")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", other.toString())
+            try {
+                val summary = Backup.restore(
+                    zip,
+                    other.resolve(".cloudstream-desktop/extensions"),
+                )
+                assertTrue(summary.contains("Restored"), summary)
+                assertEquals("mpv --fs", Settings().playerCommand)
+                assertEquals(9, Settings().parallelDownloads)
+                assertTrue(Files.isRegularFile(other.resolve(".cloudstream-desktop/extensions/demo.cs3")))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test
+    fun `restore rejects a file that carries no backup data`() {
+        val zip = Files.createTempFile("not-a-backup", ".zip")
+        java.util.zip.ZipOutputStream(Files.newOutputStream(zip)).use { out ->
+            out.putNextEntry(java.util.zip.ZipEntry("readme.txt"))
+            out.write("nothing here".toByteArray())
+            out.closeEntry()
+        }
+        val extensions = Files.createTempDirectory("cs-no-ext")
+
+        val failure = kotlin.test.assertFailsWith<IllegalStateException> {
+            Backup.restore(zip, extensions)
+        }
+        assertTrue(failure.message!!.contains("no CloudStream backup data"), failure.message)
     }
 }

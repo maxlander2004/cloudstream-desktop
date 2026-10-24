@@ -6,7 +6,6 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import app.cloudstream.desktop.ui.App
-import app.cloudstream.desktop.ui.CloudStreamTheme
 import java.awt.Dimension
 
 fun main() = application {
@@ -16,8 +15,7 @@ fun main() = application {
         state = rememberWindowState(size = DpSize(1180.dp, 760.dp)),
     ) {
         window.minimumSize = Dimension(900, 600)
-        CloudStreamTheme {
-            App()
-        }
+        // App() applies CloudStreamTheme itself so Layout → App theme can switch it live.
+        App()
     }
 }

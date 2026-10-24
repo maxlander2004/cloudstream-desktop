@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,9 +17,17 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -40,34 +49,45 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
+import app.cloudstream.desktop.api.ItemType
 import app.cloudstream.desktop.api.StreamLink
+import app.cloudstream.desktop.core.AppUpdates
+import app.cloudstream.desktop.core.AppVersion
+import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.ExtensionLoadResult
 import app.cloudstream.desktop.core.ExtensionRepository
-import app.cloudstream.desktop.core.RepositoryPlugin
-import app.cloudstream.desktop.core.RepositorySet
 import app.cloudstream.desktop.core.IptvSource
 import app.cloudstream.desktop.core.Player
+import app.cloudstream.desktop.core.RepositoryPlugin
+import app.cloudstream.desktop.core.RepositorySet
 import app.cloudstream.desktop.core.Settings
+import app.cloudstream.desktop.core.UpdateCheck
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
 
-private enum class Screen(val label: String) {
-    Home("Home"),
-    Search("Search"),
-    Extensions("Extensions"),
-    Settings("Settings"),
+private enum class Screen(val label: String, val icon: ImageVector) {
+    Home("Home", Icons.Outlined.Home),
+    Search("Search", Icons.Outlined.Search),
+    Downloads("Downloads", Icons.Outlined.Download),
+    Settings("Settings", Icons.Outlined.Settings),
 }
 
 private data class SourceEntry(
@@ -85,6 +105,8 @@ fun App() {
 
     var extensions by remember { mutableStateOf(ExtensionLoadResult()) }
     var screen by remember { mutableStateOf(Screen.Home) }
+    var settingsPage by remember { mutableStateOf(SettingsPage.Root) }
+    var darkTheme by remember { mutableStateOf(settings.appTheme != "light") }
     var sourceIndex by remember { mutableStateOf(0) }
     var items by remember { mutableStateOf<List<CatalogItem>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -93,6 +115,7 @@ fun App() {
 
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
+    var searchGroups by remember { mutableStateOf<List<Pair<String, List<CatalogItem>>>>(emptyList()) }
 
     var repos by remember { mutableStateOf<RepositorySet?>(null) }
     var repoLoading by remember { mutableStateOf(false) }
@@ -105,7 +128,10 @@ fun App() {
     var streams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
     var resolving by remember { mutableStateOf(false) }
 
-    val sources = remember(extensions) {
+    var updateBanner by remember { mutableStateOf<UpdateCheck?>(null) }
+
+    // Filtered by the Providers settings: extension languages, preferred media, NSFW.
+    val allSources = remember(extensions) {
         listOf(SourceEntry(builtin.name, builtin.description, "built-in", builtin)) +
             extensions.loaded.map {
                 SourceEntry(
@@ -116,7 +142,22 @@ fun App() {
                 )
             }
     }
+    val sources = remember(allSources, settings.providerLanguages) {
+        if (settings.providerLanguages.isEmpty()) allSources
+        else allSources.filter { source ->
+            source.origin == "built-in" ||
+                source.catalog.language?.lowercase() in settings.providerLanguages
+        }
+    }
     val current = sources.getOrNull(sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)))
+
+    fun visibleItems(list: List<CatalogItem>): List<CatalogItem> {
+        val media = settings.preferredMedia.toSet()
+        return list.filter { item ->
+            (media.isEmpty() || item.type.name in media || item.type == ItemType.OTHER) &&
+                (settings.nsfwEnabled || item.type != ItemType.NSFW)
+        }
+    }
 
     fun installExtension() {
         val dialog = FileDialog(
@@ -172,34 +213,83 @@ fun App() {
         }
     }
 
+    /** Shared install path for manual installs, updates and the auto-update options. */
+    suspend fun installPlugin(plugin: RepositoryPlugin): Result<String> = runCatching {
+        withContext(Dispatchers.IO) {
+            val file = ExtensionRepository.install(plugin, ExtensionHost.ensureExtensionsDir())
+            // Same rule as a manual install: a copy is only kept if it actually loads.
+            val load = ExtensionHost.loadAll()
+            load.loaded.firstOrNull { it.file == file }
+                ?: run {
+                    runCatching { Files.deleteIfExists(file) }
+                    val reason = load.errors
+                        .firstOrNull { it.startsWith(file.fileName.toString()) }
+                        ?.substringAfter(": ")
+                        ?: "does not contain a loadable extension"
+                    error(reason)
+                }
+        }
+        "${plugin.name} v${plugin.version}"
+    }
+
     fun installFromRepository(plugin: RepositoryPlugin) {
         scope.launch {
             installing = plugin.internalName
             status = "Downloading ${plugin.name} v${plugin.version}…"
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    val file = ExtensionRepository.install(plugin, ExtensionHost.ensureExtensionsDir())
-                    // Same rule as a manual install: a copy is only kept if it actually loads,
-                    // so a stale extension targeting an older app version cannot pile up.
-                    val load = ExtensionHost.loadAll()
-                    load.loaded.firstOrNull { it.file == file }
-                        ?: run {
-                            Files.deleteIfExists(file)
-                            val reason = load.errors
-                                .firstOrNull { it.startsWith(file.fileName.toString()) }
-                                ?.substringAfter(": ")
-                                ?: "does not contain a loadable extension"
-                            error(reason)
-                        }
-                }
-            }
+            val result = installPlugin(plugin)
             extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
             sourceIndex = 0
             installing = null
             status = result.fold(
-                onSuccess = { "Installed ${plugin.name} v${plugin.version}" },
+                onSuccess = { "Installed $it" },
                 onFailure = { "Install failed: ${it.message}" },
             )
+        }
+    }
+
+    /**
+     * Updates and Backup → Update Plugins: update everything the repositories offer newer
+     * versions of, and when *Automatically download plugins* is on, install what is missing.
+     */
+    fun updateInstalledPlugins() {
+        scope.launch {
+            status = "Checking extension updates…"
+            val set = runCatching {
+                withContext(Dispatchers.IO) { ExtensionRepository.fetchAll(settings.repositoryUrls) }
+            }.getOrElse {
+                status = "Update check failed: ${it.message}"
+                return@launch
+            }
+            repos = set
+            fetchedFrom = settings.repositoryUrls
+
+            var changed = 0
+            val plugins = set.repositories.flatMap { it.plugins }
+            for (plugin in plugins) {
+                val installed = extensions.installedVersion(plugin)
+                if (installed != null && plugin.version > installed && installing == null) {
+                    installing = plugin.internalName
+                    if (installPlugin(plugin).isSuccess) changed++
+                    installing = null
+                    extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+                }
+            }
+            if (settings.autoDownloadPlugins) {
+                for (plugin in plugins) {
+                    if (extensions.installedVersion(plugin) == null) {
+                        installing = plugin.internalName
+                        if (installPlugin(plugin).isSuccess) changed++
+                        installing = null
+                        extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+                    }
+                }
+            }
+            sourceIndex = 0
+            status = if (changed > 0) {
+                "$changed extension(s) updated or installed"
+            } else {
+                "All extensions are up to date"
+            }
         }
     }
 
@@ -211,8 +301,8 @@ fun App() {
             items = emptyList()
             runCatching { withContext(Dispatchers.IO) { target.catalog.browse() } }
                 .onSuccess {
-                    items = it
-                    status = "${it.size} items from ${target.name}"
+                    items = visibleItems(it)
+                    status = "${items.size} items from ${target.name}"
                 }
                 .onFailure {
                     failure = it.message ?: "Could not load ${target.name}"
@@ -223,21 +313,41 @@ fun App() {
     }
 
     fun runSearch() {
-        val target = current ?: return
         if (query.isBlank()) return
+        val targets = if (settings.advancedSearch) sources else listOfNotNull(current)
         scope.launch {
             searching = true
             failure = null
             items = emptyList()
-            runCatching { withContext(Dispatchers.IO) { target.catalog.search(query) } }
-                .onSuccess {
-                    items = it
-                    status = "${it.size} result(s) for \"$query\""
+            searchGroups = emptyList()
+
+            if (settings.advancedSearch && targets.size > 1) {
+                // Advanced Search: results separated by provider, like the original.
+                val results = targets.map { target ->
+                    async {
+                        target.name to runCatching {
+                            withContext(Dispatchers.IO) { target.catalog.search(query) }
+                        }.getOrElse { emptyList() }
+                    }
+                }.awaitAll()
+                searchGroups = results.map { (name, list) -> name to visibleItems(list) }
+                status = "${searchGroups.sumOf { it.second.size }} result(s) for \"$query\""
+            } else {
+                val target = targets.firstOrNull()
+                if (target == null) {
+                    searching = false
+                    return@launch
                 }
-                .onFailure {
-                    failure = it.message ?: "Search failed"
-                    status = "Search failed"
-                }
+                runCatching { withContext(Dispatchers.IO) { target.catalog.search(query) } }
+                    .onSuccess {
+                        items = visibleItems(it)
+                        status = "${items.size} result(s) for \"$query\""
+                    }
+                    .onFailure {
+                        failure = it.message ?: "Search failed"
+                        status = "Search failed"
+                    }
+            }
             searching = false
         }
     }
@@ -265,134 +375,239 @@ fun App() {
         extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
         status = "${extensions.loaded.size} extension(s) loaded"
         refreshRepository()
+
+        // Updates and Backup → startup behaviour.
+        if (settings.autoPluginUpdates || settings.autoDownloadPlugins) updateInstalledPlugins()
+        if (settings.showAppUpdates) {
+            updateBanner = runCatching { AppUpdates.check(settings.installPrerelease) }
+                .getOrNull()?.takeIf { it.newer }
+            if (updateBanner != null) status = "Update ${updateBanner!!.version} available"
+        }
     }
 
     LaunchedEffect(sourceIndex, extensions) {
         if (screen == Screen.Home) loadBrowse()
     }
 
-    // Re-fetch when the configured repositories changed, e.g. after editing them in Settings.
-    LaunchedEffect(screen) {
-        if (screen == Screen.Extensions && fetchedFrom != settings.repositoryUrls) refreshRepository()
-    }
-
-    Row(Modifier.fillMaxSize().background(CsBackground)) {
-        NavigationRail(containerColor = CsSurface) {
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "CS",
-                color = CsPrimary,
-                fontWeight = FontWeight.Bold,
-                fontSize = 20.sp,
-            )
-            Spacer(Modifier.height(16.dp))
-            Screen.entries.forEach { entry ->
-                NavigationRailItem(
-                    selected = screen == entry,
-                    onClick = {
-                        screen = entry
-                        if (entry == Screen.Home) loadBrowse()
-                    },
-                    icon = {
-                        Text(
-                            text = entry.label.take(1),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                        )
-                    },
-                    label = { Text(entry.label, fontSize = 11.sp) },
-                    colors = NavigationRailItemDefaults.colors(
-                        selectedIconColor = androidx.compose.ui.graphics.Color.White,
-                        selectedTextColor = CsOnBackground,
-                        indicatorColor = CsPrimary,
-                        unselectedIconColor = CsSecondaryText,
-                        unselectedTextColor = CsSecondaryText,
-                    ),
-                )
-            }
-        }
-
-        Box(Modifier.width(1.dp).fillMaxHeight().background(CsSurfaceVariant))
-
-        Column(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp)) {
-            when (screen) {
-                Screen.Home -> HomeScreen(
-                    sources = sources,
-                    sourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)),
-                    onSelectSource = {
-                        sourceIndex = it
-                        loadBrowse()
-                    },
-                    items = items,
-                    loading = loading,
-                    failure = failure,
-                    onRetry = ::loadBrowse,
-                    onOpen = ::openStreams,
-                )
-
-                Screen.Search -> SearchScreen(
-                    query = query,
-                    onQueryChange = { query = it },
-                    onSubmit = ::runSearch,
-                    searching = searching,
-                    items = items,
-                    failure = failure,
-                    onOpen = ::openStreams,
-                )
-
-                Screen.Extensions -> ExtensionsScreen(
-                    extensions = extensions,
-                    repos = repos,
-                    repoLoading = repoLoading,
-                    repoError = repoError,
-                    repoQuery = repoQuery,
-                    onQueryChange = { repoQuery = it },
-                    installing = installing,
-                    onReload = ::reloadExtensions,
-                    onInstall = ::installExtension,
-                    onRefreshRepository = ::refreshRepository,
-                    onInstallRepository = ::installFromRepository,
-                )
-
-                Screen.Settings -> SettingsScreen(settings = settings, status = status)
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Text(status, color = CsSecondaryText, fontSize = 11.sp)
+    // Re-fetch when the configured repositories changed, e.g. after adding one.
+    LaunchedEffect(screen, settingsPage) {
+        if (screen == Screen.Settings && settingsPage == SettingsPage.Extensions &&
+            fetchedFrom != settings.repositoryUrls
+        ) {
+            refreshRepository()
         }
     }
 
-    val item = activeItem
-    if (item != null) {
-        AlertDialog(
-            onDismissRequest = { activeItem = null },
-            title = { Text(item.title) },
-            text = {
-                if (resolving) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Text("Resolving streams…")
-                    }
-                } else {
-                    LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                        items(streams) { stream ->
-                            TextButton(
-                                onClick = {
-                                    status = Player.open(stream, settings.playerCommand)
-                                    activeItem = null
-                                },
+    CloudStreamTheme(dark = darkTheme) {
+        Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "CS",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp,
+                )
+                Spacer(Modifier.height(16.dp))
+                Screen.entries.forEach { entry ->
+                    NavigationRailItem(
+                        selected = screen == entry,
+                        onClick = {
+                            screen = entry
+                            if (entry == Screen.Home) loadBrowse()
+                        },
+                        icon = {
+                            androidx.compose.material3.Icon(
+                                entry.icon,
+                                contentDescription = entry.label,
+                                modifier = Modifier.height(20.dp),
+                            )
+                        },
+                        label = { Text(entry.label, fontSize = 11.sp) },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = Color.White,
+                            selectedTextColor = MaterialTheme.colorScheme.onBackground,
+                            indicatorColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                    )
+                }
+            }
+
+            Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surfaceVariant))
+
+            Column(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp)) {
+                when (screen) {
+                    Screen.Home -> {
+                        updateBanner?.let { info ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .clickable {
+                                        runCatching { Desktop.getDesktop().browse(URI(info.url)) }
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
                             ) {
-                                Text(stream.title)
+                                Text(
+                                    "Update ${info.version} available — click to open the download page",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                            Spacer(Modifier.height(10.dp))
+                        }
+
+                        HomeScreen(
+                            sources = sources,
+                            sourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)),
+                            onSelectSource = {
+                                sourceIndex = it
+                                loadBrowse()
+                            },
+                            items = items,
+                            loading = loading,
+                            failure = failure,
+                            onRetry = ::loadBrowse,
+                            onOpen = ::openStreams,
+                            posterSize = settings.posterSize,
+                            titleUnder = settings.posterTitleUnder,
+                        )
+                    }
+
+                    Screen.Search -> SearchScreen(
+                        query = query,
+                        onQueryChange = { query = it },
+                        onSubmit = ::runSearch,
+                        searching = searching,
+                        items = items,
+                        searchGroups = searchGroups,
+                        advanced = settings.advancedSearch,
+                        failure = failure,
+                        onOpen = ::openStreams,
+                        posterSize = settings.posterSize,
+                        titleUnder = settings.posterTitleUnder,
+                    )
+
+                    Screen.Downloads -> DownloadsScreen(
+                        settings = settings,
+                        onStatus = { status = it },
+                    )
+
+                    Screen.Settings -> when (settingsPage) {
+                        SettingsPage.Root -> SettingsRootScreen(onOpen = { settingsPage = it })
+
+                        SettingsPage.General -> GeneralSettings(
+                            settings = settings,
+                            onBack = { settingsPage = SettingsPage.Root },
+                            onStatus = { status = it },
+                        )
+
+                        SettingsPage.Player -> PlayerSettings(
+                            settings = settings,
+                            onBack = { settingsPage = SettingsPage.Root },
+                        )
+
+                        SettingsPage.Providers -> ProvidersSettings(
+                            settings = settings,
+                            languages = allSources.mapNotNull { it.catalog.language?.lowercase() }.distinct(),
+                            testTargets = allSources.map { it.catalog },
+                            onBack = { settingsPage = SettingsPage.Root },
+                        )
+
+                        SettingsPage.Layout -> LayoutSettings(
+                            settings = settings,
+                            dark = darkTheme,
+                            onThemeChange = { darkTheme = it },
+                            onBack = { settingsPage = SettingsPage.Root },
+                        )
+
+                        SettingsPage.UpdatesBackup -> UpdatesBackupSettings(
+                            settings = settings,
+                            onBack = { settingsPage = SettingsPage.Root },
+                            onStatus = { status = it },
+                            onRefreshExtensions = ::reloadExtensions,
+                            onUpdatePlugins = ::updateInstalledPlugins,
+                        )
+
+                        SettingsPage.Extensions -> ExtensionsScreen(
+                            settings = settings,
+                            extensions = extensions,
+                            repos = repos,
+                            repoLoading = repoLoading,
+                            repoError = repoError,
+                            repoQuery = repoQuery,
+                            onQueryChange = { repoQuery = it },
+                            installing = installing,
+                            onReload = ::reloadExtensions,
+                            onInstallFile = ::installExtension,
+                            onRefreshRepository = ::refreshRepository,
+                            onInstallRepository = ::installFromRepository,
+                            onStatus = { status = it },
+                        )
+
+                        SettingsPage.Accounts -> AccountsSettings(
+                            onBack = { settingsPage = SettingsPage.Root },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            }
+        }
+
+        val item = activeItem
+        if (item != null) {
+            AlertDialog(
+                onDismissRequest = { activeItem = null },
+                title = { Text(item.title) },
+                text = {
+                    if (resolving) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text("Resolving streams…")
+                        }
+                    } else {
+                        LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                            items(streams) { stream ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(
+                                        onClick = {
+                                            status = Player.open(stream, settings.playerCommand)
+                                            activeItem = null
+                                        },
+                                    ) {
+                                        Text(stream.title, modifier = Modifier.padding(end = 8.dp))
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            DownloadManager.add(
+                                                settings = settings,
+                                                title = "${item.title} · ${stream.title}",
+                                                url = stream.url,
+                                                headers = stream.headers,
+                                            )
+                                            status = "Queued ${item.title}"
+                                            activeItem = null
+                                            screen = Screen.Downloads
+                                        },
+                                    ) { Text("Download") }
+                                }
                             }
                         }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { activeItem = null }) { Text("Close") }
-            },
-        )
+                },
+                confirmButton = {
+                    TextButton(onClick = { activeItem = null }) { Text("Close") }
+                },
+            )
+        }
     }
 }
 
@@ -406,11 +621,13 @@ private fun HomeScreen(
     failure: String?,
     onRetry: () -> Unit,
     onOpen: (CatalogItem) -> Unit,
+    posterSize: Int,
+    titleUnder: Boolean,
 ) {
-    Text("CloudStream", style = MaterialTheme.typography.headlineMedium, color = CsOnBackground)
+    Text("CloudStream", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
     Text(
         "Native desktop build · ${sources.size} source(s)",
-        color = CsSecondaryText,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
     )
     Spacer(Modifier.height(14.dp))
@@ -432,7 +649,7 @@ private fun HomeScreen(
 
     val description = sources.getOrNull(sourceIndex)?.description.orEmpty()
     if (description.isNotEmpty()) {
-        Text(description, color = CsSecondaryText, fontSize = 12.sp)
+        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         Spacer(Modifier.height(10.dp))
     }
 
@@ -440,16 +657,21 @@ private fun HomeScreen(
         loading -> Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(12.dp))
-            Text("Loading content…", color = CsSecondaryText)
+            Text("Loading content…", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
         failure != null -> Column {
-            Text(failure, color = CsAccent)
+            Text(failure, color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(10.dp))
             Button(onClick = onRetry) { Text("Retry") }
         }
 
-        else -> ItemList(items = items, onOpen = onOpen)
+        else -> ItemList(
+            items = items,
+            posterSize = posterSize,
+            titleUnder = titleUnder,
+            onOpen = onOpen,
+        )
     }
 }
 
@@ -460,10 +682,14 @@ private fun SearchScreen(
     onSubmit: () -> Unit,
     searching: Boolean,
     items: List<CatalogItem>,
+    searchGroups: List<Pair<String, List<CatalogItem>>>,
+    advanced: Boolean,
     failure: String?,
     onOpen: (CatalogItem) -> Unit,
+    posterSize: Int,
+    titleUnder: Boolean,
 ) {
-    Text("Search", style = MaterialTheme.typography.headlineMedium, color = CsOnBackground)
+    Text("Search", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
     Spacer(Modifier.height(14.dp))
 
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -481,231 +707,119 @@ private fun SearchScreen(
     Spacer(Modifier.height(16.dp))
 
     when {
-        searching -> CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
-        failure != null -> Text(failure, color = CsAccent)
-        items.isEmpty() -> Text("No results yet.", color = CsSecondaryText)
-        else -> ItemList(items = items, onOpen = onOpen)
-    }
-}
-
-@Composable
-private fun ExtensionsScreen(
-    extensions: ExtensionLoadResult,
-    repos: RepositorySet?,
-    repoLoading: Boolean,
-    repoError: String?,
-    repoQuery: String,
-    onQueryChange: (String) -> Unit,
-    installing: String?,
-    onReload: () -> Unit,
-    onInstall: () -> Unit,
-    onRefreshRepository: () -> Unit,
-    onInstallRepository: (RepositoryPlugin) -> Unit,
-) {
-    Text("Extensions", style = MaterialTheme.typography.headlineMedium, color = CsOnBackground)
-    Spacer(Modifier.height(8.dp))
-    Text(
-        "The CloudStream extension repositories: install any provider below, the same .cs3 " +
-            "archives the Android app uses, verified against the repository's published hashes. " +
-            "Their Dalvik bytecode is translated and linked against a JVM build of CloudStream's " +
-            "own library. Desktop .jar extensions implementing Catalog work too.",
-        color = CsSecondaryText,
-        fontSize = 12.sp,
-    )
-    Spacer(Modifier.height(14.dp))
-
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Button(onClick = onInstall) { Text("Install file…") }
-        Button(onClick = onReload) { Text("Reload") }
-        Button(
-            onClick = {
-                runCatching { Desktop.getDesktop().open(ExtensionHost.ensureExtensionsDir().toFile()) }
-            },
-        ) { Text("Open extensions folder") }
-    }
-
-    Spacer(Modifier.height(18.dp))
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("Available extensions", color = CsOnBackground, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.width(10.dp))
-        Text(
-            when {
-                repos == null -> "CloudStream repository"
-                else -> "${repos.repositories.size} repositories · ${repos.pluginCount} extensions"
-            },
-            color = CsSecondaryText,
-            fontSize = 11.sp,
-        )
-        Spacer(Modifier.width(10.dp))
-        if (repoLoading) {
-            CircularProgressIndicator(Modifier.height(14.dp).width(14.dp), strokeWidth = 2.dp)
-        } else {
-            Button(onClick = onRefreshRepository) { Text("Refresh") }
+        searching -> Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(12.dp))
+            Text("Searching…", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
-    Spacer(Modifier.height(8.dp))
 
-    OutlinedTextField(
-        value = repoQuery,
-        onValueChange = onQueryChange,
-        label = { Text("Filter extensions") },
-        singleLine = true,
-        modifier = Modifier.width(420.dp),
-    )
-    Spacer(Modifier.height(8.dp))
+        failure != null -> Text(failure, color = MaterialTheme.colorScheme.error)
 
-    when {
-        repoError != null -> Text(repoError, color = CsAccent, fontSize = 12.sp)
-        repos == null && repoLoading -> Text("Loading repositories…", color = CsSecondaryText)
-        repos != null -> {
-            val query = repoQuery.trim().lowercase()
-            val filtered = repos.repositories.mapNotNull { state ->
-                state.copy(
-                    plugins = state.plugins.filter { plugin ->
-                        query.isEmpty() ||
-                            plugin.name.lowercase().contains(query) ||
-                            plugin.internalName.lowercase().contains(query) ||
-                            plugin.description?.lowercase()?.contains(query) == true
-                    },
-                ).takeIf { it.plugins.isNotEmpty() }
-            }
-
-            if (filtered.sumOf { it.plugins.size } == 0) {
-                Text("No extension matches \"$repoQuery\".", color = CsSecondaryText)
-            } else {
-                LazyColumn(
-                    Modifier.heightIn(max = 320.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    filtered.forEach { state ->
-                        item(key = "repo:${state.name}") {
-                            Text(
-                                state.name,
-                                color = CsSecondaryText,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
-                        items(state.plugins, key = { "${state.name}/${it.internalName}" }) { plugin ->
-                            RepositoryRow(
-                                plugin = plugin,
-                                repoName = state.name,
-                                installedVersion = extensions.installedVersion(plugin),
-                                installing = installing == plugin.internalName,
-                                onInstall = { onInstallRepository(plugin) },
-                            )
-                        }
+        advanced && searchGroups.isNotEmpty() -> LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            searchGroups.forEach { (sourceName, group) ->
+                if (group.isNotEmpty()) {
+                    item(key = "header:$sourceName") {
+                        Text(
+                            sourceName,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 13.sp,
+                        )
+                    }
+                    item(key = "grid:$sourceName") {
+                        ItemList(
+                            items = group,
+                            posterSize = posterSize,
+                            titleUnder = titleUnder,
+                            onOpen = onOpen,
+                        )
                     }
                 }
             }
-
-            if (repos.failures.isNotEmpty()) {
-                Text(
-                    "${repos.failures.size} repositories unreachable — Refresh to try again",
-                    color = CsSecondaryText,
-                    fontSize = 11.sp,
-                )
-            }
         }
+
+        items.isEmpty() -> Text("No results yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        else -> ItemList(
+            items = items,
+            posterSize = posterSize,
+            titleUnder = titleUnder,
+            onOpen = onOpen,
+        )
     }
+}
 
-    Spacer(Modifier.height(18.dp))
-    Text("Installed", color = CsOnBackground, fontWeight = FontWeight.Medium)
-    Spacer(Modifier.height(8.dp))
-
-    if (extensions.loaded.isEmpty()) {
-        Text("No extensions installed.", color = CsSecondaryText)
-    } else {
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(extensions.loaded) { extension ->
+/**
+ * The original app's poster grid: artwork in fixed cells with the title under the poster (or
+ * overlaid when *Poster title location* is off); *Poster size* controls how many fit a row.
+ */
+@Composable
+private fun ItemList(
+    items: List<CatalogItem>,
+    posterSize: Int,
+    titleUnder: Boolean,
+    onOpen: (CatalogItem) -> Unit,
+) {
+    val columns = (8 - posterSize).coerceIn(3, 8)
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(columns),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        items(items, key = { it.url + it.title }) { item ->
+            Column(
+                Modifier.clickable { onOpen(item) },
+            ) {
                 Box(
                     Modifier.fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(CsSurface)
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .aspectRatio(0.67f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surface),
                 ) {
-                    Column {
-                        Text(
-                            extension.manifest.name ?: extension.catalog.name,
-                            color = CsOnBackground,
-                            fontWeight = FontWeight.Medium,
+                    if (item.posterUrl != null) {
+                        AsyncImage(
+                            model = item.posterUrl,
+                            contentDescription = item.title,
+                            modifier = Modifier.fillMaxSize(),
                         )
+                    }
+                    if (!titleUnder) {
                         Text(
-                            buildString {
-                                append("v${extension.manifest.version ?: 0}")
-                                append(" · ")
-                                append(extension.file.fileName)
-                                if (extension.legacy) append(" · CloudStream")
-                            },
-                            color = CsSecondaryText,
-                            fontSize = 11.sp,
+                            item.title,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.55f))
+                                .padding(6.dp),
                         )
                     }
                 }
-            }
-        }
-    }
-
-    if (extensions.errors.isNotEmpty()) {
-        Spacer(Modifier.height(14.dp))
-        Text("Failed to load:", color = CsAccent, fontWeight = FontWeight.Medium)
-        extensions.errors.forEach { Text(it, color = CsAccent, fontSize = 11.sp) }
-    }
-}
-
-@Composable
-private fun RepositoryRow(
-    plugin: RepositoryPlugin,
-    repoName: String?,
-    installedVersion: Int?,
-    installing: Boolean,
-    onInstall: () -> Unit,
-) {
-    Box(
-        Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(CsSurface)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(plugin.name, color = CsOnBackground, fontWeight = FontWeight.Medium)
-                Text(
-                    buildString {
-                        append("v${plugin.version}")
-                        append(" · ")
-                        append(plugin.statusLabel)
-                        if (plugin.authors.isNotEmpty()) {
-                            append(" · by ")
-                            append(plugin.authors.joinToString(", "))
-                        }
-                        if (!repoName.isNullOrBlank()) append(" · $repoName")
-                        if (installedVersion != null) append(" · installed v$installedVersion")
-                    },
-                    color = CsSecondaryText,
-                    fontSize = 11.sp,
-                )
-                plugin.description?.let {
-                    Text(it, color = CsSecondaryText, fontSize = 11.sp)
+                if (titleUnder) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        item.title,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
+                    )
+                    val subtitle = item.subtitle
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1)
+                    }
                 }
-            }
-            Spacer(Modifier.width(10.dp))
-            val label = when {
-                installing -> "…"
-                installedVersion == null -> "Install"
-                plugin.version > installedVersion -> "Update"
-                else -> "Installed"
-            }
-            Button(onClick = onInstall, enabled = !installing && label != "Installed") {
-                Text(label)
             }
         }
     }
 }
 
 /** Matches a repository entry to its installed extension, whatever the local file is called. */
-private fun ExtensionLoadResult.installedVersion(plugin: RepositoryPlugin): Int? {
+internal fun ExtensionLoadResult.installedVersion(plugin: RepositoryPlugin): Int? {
     val match = loaded.firstOrNull { extension ->
         extension.file.fileName.toString().substringBeforeLast('.') == plugin.internalName ||
             extension.manifest.name == plugin.internalName ||
@@ -713,86 +827,4 @@ private fun ExtensionLoadResult.installedVersion(plugin: RepositoryPlugin): Int?
     } ?: return null
     // A version we do not know counts as older than anything the repository offers.
     return match.manifest.version ?: 0
-}
-
-@Composable
-private fun SettingsScreen(settings: Settings, status: String) {
-    Text("Settings", style = MaterialTheme.typography.headlineMedium, color = CsOnBackground)
-    Spacer(Modifier.height(14.dp))
-
-    Text("Player command", color = CsOnBackground, fontWeight = FontWeight.Medium)
-    Text(
-        "Streams are handed to an external player, e.g. mpv or the full path to vlc.exe. " +
-            "Leave empty to open links in your default browser.",
-        color = CsSecondaryText,
-        fontSize = 12.sp,
-    )
-    Spacer(Modifier.height(8.dp))
-
-    var command by remember { mutableStateOf(settings.playerCommand) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = command,
-            onValueChange = { command = it },
-            label = { Text("Command") },
-            singleLine = true,
-            modifier = Modifier.width(420.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Button(onClick = { settings.playerCommand = command }) { Text("Save") }
-    }
-
-    Spacer(Modifier.height(18.dp))
-    Text("Extension repositories", color = CsOnBackground, fontWeight = FontWeight.Medium)
-    Text(
-        "The indexes the Extensions screen lists and installs from, one per line. Any " +
-            "compatible repo.json works, and shortcodes work too — type megarepo for every " +
-            "known community repository, like in the Android app.",
-        color = CsSecondaryText,
-        fontSize = 12.sp,
-    )
-    Spacer(Modifier.height(8.dp))
-
-    var repoUrls by remember { mutableStateOf(settings.repositoryUrls.joinToString("\n")) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = repoUrls,
-            onValueChange = { repoUrls = it },
-            label = { Text("Repository urls (one per line)") },
-            modifier = Modifier.width(420.dp).heightIn(min = 72.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Button(
-            onClick = {
-                settings.repositoryUrls = repoUrls.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            },
-        ) { Text("Save") }
-    }
-
-    Spacer(Modifier.height(18.dp))
-    Text("Saved to ~/.cloudstream-desktop/settings.properties", color = CsSecondaryText, fontSize = 11.sp)
-    Text(status, color = CsSecondaryText, fontSize = 11.sp)
-}
-
-@Composable
-private fun ItemList(items: List<CatalogItem>, onOpen: (CatalogItem) -> Unit) {
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(items, key = { it.url + it.title }) { item ->
-            Box(
-                Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(CsSurface)
-                    .clickable { onOpen(item) }
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-            ) {
-                Column {
-                    Text(item.title, color = CsOnBackground, fontWeight = FontWeight.Medium)
-                    val subtitle = item.subtitle
-                    if (!subtitle.isNullOrBlank()) {
-                        Text(subtitle, color = CsSecondaryText, fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-    }
 }

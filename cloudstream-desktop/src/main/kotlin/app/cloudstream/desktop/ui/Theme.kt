@@ -2,6 +2,7 @@ package app.cloudstream.desktop.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
@@ -29,7 +30,25 @@ private val CloudStreamDark = darkColorScheme(
     error = CsAccent,
 )
 
+// The original app also ships a light theme (Layout → App theme); these follow its palette.
+private val CloudStreamLight = lightColorScheme(
+    primary = CsPrimary,
+    onPrimary = Color.White,
+    secondary = CsAccent,
+    onSecondary = Color.White,
+    background = Color(0xFFF7F7F9),
+    onBackground = Color(0xFF17181C),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF17181C),
+    surfaceVariant = Color(0xFFE8E9EE),
+    onSurfaceVariant = Color(0xFF5C626B),
+    error = CsAccent,
+)
+
 @Composable
-fun CloudStreamTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = CloudStreamDark, content = content)
+fun CloudStreamTheme(dark: Boolean = true, content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = if (dark) CloudStreamDark else CloudStreamLight,
+        content = content,
+    )
 }

@@ -1,0 +1,160 @@
+package app.cloudstream.desktop.core
+
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.util.Properties
+import java.nio.file.Files
+
+/**
+ * All user preferences, persisted as a plain properties file next to the extensions folder —
+ * the same role DataStore plays in the Android app. Keys mirror the original settings names
+ * so a value is recognisable from the app it was copied from.
+ */
+class Settings {
+    private val file: Path =
+        Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "settings.properties")
+
+    private val props = Properties()
+
+    init {
+        runCatching { Files.newInputStream(file).use { props.load(it) } }
+    }
+
+    private fun get(key: String, default: String) = props.getProperty(key, default)
+    private fun set(key: String, value: String) {
+        props.setProperty(key, value)
+        save()
+    }
+    private fun getInt(key: String, default: Int) = get(key, default.toString()).toIntOrNull() ?: default
+    private fun getBool(key: String, default: Boolean) = get(key, default.toString()).toBooleanStrictOrNull() ?: default
+
+    // ---------------------------------------------------------------- Player
+    var playerCommand: String
+        get() = get("player.command", "")
+        set(value) = set("player.command", value)
+
+    // ---------------------------------------------------------------- Repositories
+    /**
+     * Repositories listed on the Extensions screen, the official one by default. Shortcodes
+     * like `megarepo` are allowed here; they are resolved when the list is fetched.
+     */
+    var repositoryUrls: List<String>
+        get() = (props.getProperty("repository.urls")
+            ?: props.getProperty("repository.url")
+            ?: ExtensionRepository.OFFICIAL_REPOSITORY)
+            .split(';')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .ifEmpty { listOf(ExtensionRepository.OFFICIAL_REPOSITORY) }
+        set(value) {
+            set(
+                "repository.urls",
+                value.joinToString(";") { it.trim() }.trim(';'),
+            )
+        }
+
+    // ---------------------------------------------------------------- General
+    var downloadsDir: String
+        get() = get("downloads.dir", Paths.get(System.getProperty("user.home"), "Downloads", "CloudStream").toString())
+        set(value) = set("downloads.dir", value)
+
+    /** How many different items download in parallel, the original's Parallel downloads. */
+    var parallelDownloads: Int
+        get() = getInt("downloads.parallel", 3).coerceIn(1, 10)
+        set(value) = set("downloads.parallel", value.coerceIn(1, 10).toString())
+
+    /** How many ranged connections each download may use — the original's Concurrent connections. */
+    var concurrentConnections: Int
+        get() = getInt("downloads.connections", 3).coerceIn(1, 10)
+        set(value) = set("downloads.connections", value.coerceIn(1, 10).toString())
+
+    /** "originalUrl=replacementUrl"; mirrors upstream's Clone site bypass. */
+    var cloneSite: String
+        get() = get("bypass.cloneSite", "")
+        set(value) = set("bypass.cloneSite", value.trim())
+
+    /** One of [dohProviders] keys; applied to the app's own HTTP lookups. */
+    var doh: String
+        get() = get("bypass.doh", "off")
+        set(value) = set("bypass.doh", value)
+
+    /** Bypass raw.githubusercontent.com blocking through jsDelivr, like the original toggle. */
+    var githubProxy: Boolean
+        get() = getBool("bypass.githubProxy", false)
+        set(value) = set("bypass.githubProxy", value.toString())
+
+    // ---------------------------------------------------------------- Providers
+    /** Empty means every language; otherwise provider languages, lowercase. */
+    var providerLanguages: List<String>
+        get() = get("providers.languages", "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        set(value) = set("providers.languages", value.joinToString(",") { it.trim().lowercase() }.trim(','))
+
+    /** Empty means all media; otherwise ItemType names, uppercase. */
+    var preferredMedia: List<String>
+        get() = get("providers.media", "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        set(value) = set("providers.media", value.joinToString(",") { it.trim().uppercase() }.trim(','))
+
+    var displayDubbedSubbed: Boolean
+        get() = getBool("providers.dubbed", true)
+        set(value) = set("providers.dubbed", value.toString())
+
+    var nsfwEnabled: Boolean
+        get() = getBool("providers.nsfw", false)
+        set(value) = set("providers.nsfw", value.toString())
+
+    // ---------------------------------------------------------------- Layout
+    /** "dark" or "light". */
+    var appTheme: String
+        get() = get("layout.theme", "dark")
+        set(value) = set("layout.theme", value)
+
+    /** 0 = smallest posters (most columns), like the original's slider. */
+    var posterSize: Int
+        get() = getInt("layout.posterSize", 2).coerceIn(0, 6)
+        set(value) = set("layout.posterSize", value.coerceIn(0, 6).toString())
+
+    var posterTitleUnder: Boolean
+        get() = getBool("layout.posterTitle", true)
+        set(value) = set("layout.posterTitle", value.toString())
+
+    var advancedSearch: Boolean
+        get() = getBool("layout.advancedSearch", true)
+        set(value) = set("layout.advancedSearch", value.toString())
+
+    // ---------------------------------------------------------------- Updates and Backup
+    var showAppUpdates: Boolean
+        get() = getBool("updates.checkOnStartup", true)
+        set(value) = set("updates.checkOnStartup", value.toString())
+
+    var installPrerelease: Boolean
+        get() = getBool("updates.prerelease", false)
+        set(value) = set("updates.prerelease", value.toString())
+
+    var autoPluginUpdates: Boolean
+        get() = getBool("plugins.autoUpdate", true)
+        set(value) = set("plugins.autoUpdate", value.toString())
+
+    var autoDownloadPlugins: Boolean
+        get() = getBool("plugins.autoInstallAll", false)
+        set(value) = set("plugins.autoInstallAll", value.toString())
+
+    var backupDir: String
+        get() = get("backup.dir", Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "backup").toString())
+        set(value) = set("backup.dir", value)
+
+    companion object {
+        /** DNS-over-HTTPS resolvers offered in General, by display name. */
+        val dohProviders = linkedMapOf(
+            "off" to "Off",
+            "cloudflare" to "Cloudflare (1.1.1.1)",
+            "google" to "Google (8.8.8.8)",
+        )
+    }
+
+    private fun save() {
+        runCatching {
+            Files.createDirectories(file.parent)
+            Files.newOutputStream(file).use { props.store(it, "CloudStream Desktop") }
+        }
+    }
+}

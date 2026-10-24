@@ -66,6 +66,8 @@ data class RepositoryState(
     val name: String,
     val description: String?,
     val plugins: List<RepositoryPlugin>,
+    /** The repository url this state was fetched from; shown on the Extensions screen. */
+    val url: String? = null,
 )
 
 /** Several repositories merged into what the Extensions screen lists. */
@@ -205,7 +207,7 @@ object ExtensionRepository {
 
         if (element is JsonArray) {
             val plugins = json.decodeFromJsonElement<List<RepositoryPlugin>>(element)
-            return RepositoryState(name = url.substringAfterLast('/'), description = null, plugins = plugins)
+            return RepositoryState(name = url.substringAfterLast('/'), description = null, plugins = plugins, url = url)
         }
 
         val manifest = json.decodeFromJsonElement<RepositoryManifest>(element)
@@ -222,6 +224,7 @@ object ExtensionRepository {
             name = manifest.name ?: url.substringAfterLast('/'),
             description = manifest.description,
             plugins = plugins,
+            url = url,
         )
     }
 

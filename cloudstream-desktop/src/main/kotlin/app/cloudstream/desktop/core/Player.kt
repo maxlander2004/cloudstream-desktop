@@ -3,10 +3,6 @@ package app.cloudstream.desktop.core
 import app.cloudstream.desktop.api.StreamLink
 import java.awt.Desktop
 import java.net.URI
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-import java.util.Properties
 
 /**
  * Playback is delegated to a real desktop player instead of re-implementing ExoPlayer.
@@ -56,47 +52,4 @@ object Player {
     }
 }
 
-class Settings {
-    private val file: Path =
-        Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "settings.properties")
-
-    private val props = Properties()
-
-    init {
-        runCatching { Files.newInputStream(file).use { props.load(it) } }
-    }
-
-    var playerCommand: String
-        get() = props.getProperty("player.command", "")
-        set(value) {
-            props.setProperty("player.command", value)
-            save()
-        }
-
-    /**
-     * Repositories listed on the Extensions screen, the official one by default. Shortcodes
-     * like `megarepo` are allowed here; they are resolved when the list is fetched.
-     */
-    var repositoryUrls: List<String>
-        get() = (props.getProperty("repository.urls")
-            ?: props.getProperty("repository.url")
-            ?: ExtensionRepository.OFFICIAL_REPOSITORY)
-            .split(';')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .ifEmpty { listOf(ExtensionRepository.OFFICIAL_REPOSITORY) }
-        set(value) {
-            props.setProperty(
-                "repository.urls",
-                value.joinToString(";") { it.trim() }.trim(';'),
-            )
-            save()
-        }
-
-    private fun save() {
-        runCatching {
-            Files.createDirectories(file.parent)
-            Files.newOutputStream(file).use { props.store(it, "CloudStream Desktop") }
-        }
-    }
-}
+// Settings moved to core/Settings.kt where the full set of preferences lives.

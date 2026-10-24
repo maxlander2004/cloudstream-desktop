@@ -18,6 +18,10 @@ interface Catalog {
     val description: String
         get() = ""
 
+    /** Provider language as upstream reports it, e.g. "en"; null when unknown. */
+    val language: String?
+        get() = null
+
     /** Featured/landing content for this source. */
     suspend fun browse(): List<CatalogItem>
 
@@ -28,11 +32,18 @@ interface Catalog {
     suspend fun streams(item: CatalogItem): List<StreamLink>
 }
 
+/**
+ * Content category, named after upstream's `TvType` so extension types map 1:1. Used by the
+ * Providers settings (preferred media, NSFW filter) exactly like the Android app uses them.
+ */
+enum class ItemType { MOVIE, SERIES, ANIME, LIVE, NSFW, OTHER }
+
 data class CatalogItem(
     val title: String,
     val url: String,
     val subtitle: String? = null,
     val posterUrl: String? = null,
+    val type: ItemType = ItemType.OTHER,
 )
 
 data class StreamLink(

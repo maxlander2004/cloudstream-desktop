@@ -33,6 +33,9 @@ class LegacyCatalog(
         provider.lang?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it.uppercase()) }
     }
 
+    override val language: String?
+        get() = provider.lang.takeIf { it.isNotBlank() }
+
     /** `load()` is the expensive step; the stream dialog may be reopened for the same item. */
     private val loaded = ConcurrentHashMap<String, LoadResponse>()
 
@@ -119,5 +122,16 @@ class LegacyCatalog(
         url = url,
         subtitle = apiName.ifBlank { null },
         posterUrl = posterUrl,
+        type = type.toItemType(),
     )
+
+    /** Upstream's `TvType` reduced to the desktop categories the Providers settings filter on. */
+    private fun com.lagradost.cloudstream3.TvType?.toItemType() = when (this?.name?.lowercase()) {
+        "movie" -> app.cloudstream.desktop.api.ItemType.MOVIE
+        "tvseries", "tvshow" -> app.cloudstream.desktop.api.ItemType.SERIES
+        "anime", "ova", "animeothers" -> app.cloudstream.desktop.api.ItemType.ANIME
+        "live", "livestream" -> app.cloudstream.desktop.api.ItemType.LIVE
+        "nsfw" -> app.cloudstream.desktop.api.ItemType.NSFW
+        else -> app.cloudstream.desktop.api.ItemType.OTHER
+    }
 }
