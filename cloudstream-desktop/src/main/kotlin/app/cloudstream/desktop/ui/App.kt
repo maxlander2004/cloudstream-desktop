@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -23,15 +25,23 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -50,12 +60,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
+import app.cloudstream.desktop.api.HomeSection
 import app.cloudstream.desktop.api.ItemType
 import app.cloudstream.desktop.api.StreamLink
 import app.cloudstream.desktop.core.AppUpdates
@@ -109,6 +122,7 @@ fun App() {
     var darkTheme by remember { mutableStateOf(settings.appTheme != "light") }
     var sourceIndex by remember { mutableStateOf(0) }
     var items by remember { mutableStateOf<List<CatalogItem>>(emptyList()) }
+    var homeSections by remember { mutableStateOf<List<HomeSection>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Loading…") }
@@ -299,9 +313,13 @@ fun App() {
             loading = true
             failure = null
             items = emptyList()
-            runCatching { withContext(Dispatchers.IO) { target.catalog.browse() } }
-                .onSuccess {
-                    items = visibleItems(it)
+            homeSections = emptyList()
+            runCatching { withContext(Dispatchers.IO) { target.catalog.browseSections() } }
+                .onSuccess { sections ->
+                    homeSections = sections.map { section ->
+                        HomeSection(section.name, visibleItems(section.items))
+                    }
+                    items = homeSections.flatMap { it.items }
                     status = "${items.size} items from ${target.name}"
                 }
                 .onFailure {
@@ -469,13 +487,15 @@ fun App() {
                                 sourceIndex = it
                                 loadBrowse()
                             },
-                            items = items,
+                            sections = homeSections,
                             loading = loading,
                             failure = failure,
                             onRetry = ::loadBrowse,
                             onOpen = ::openStreams,
                             posterSize = settings.posterSize,
                             titleUnder = settings.posterTitleUnder,
+                            randomButton = settings.randomButton,
+                            showClock = settings.showClock,
                         )
                     }
 
@@ -491,6 +511,7 @@ fun App() {
                         onOpen = ::openStreams,
                         posterSize = settings.posterSize,
                         titleUnder = settings.posterTitleUnder,
+                        nsfwEnabled = settings.nsfwEnabled,
                     )
 
                     Screen.Downloads -> DownloadsScreen(
@@ -551,6 +572,7 @@ fun App() {
                         )
 
                         SettingsPage.Accounts -> AccountsSettings(
+                            settings = settings,
                             onBack = { settingsPage = SettingsPage.Root },
                         )
                     }
@@ -616,41 +638,50 @@ private fun HomeScreen(
     sources: List<SourceEntry>,
     sourceIndex: Int,
     onSelectSource: (Int) -> Unit,
-    items: List<CatalogItem>,
+    sections: List<HomeSection>,
     loading: Boolean,
     failure: String?,
     onRetry: () -> Unit,
     onOpen: (CatalogItem) -> Unit,
     posterSize: Int,
     titleUnder: Boolean,
+    randomButton: Boolean,
+    showClock: Boolean,
 ) {
-    Text("CloudStream", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
-    Text(
-        "Native desktop build · ${sources.size} source(s)",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-    )
-    Spacer(Modifier.height(14.dp))
-
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        sources.forEachIndexed { index, source ->
-            FilterChip(
-                selected = index == sourceIndex,
-                onClick = { onSelectSource(index) },
-                label = { Text(source.name) },
+    // Upstream's home has no title; the top row is the source picker (the original's
+    // "Change API" FAB) and, when enabled, the real-time clock (tv_layout_clock_key).
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            sources.forEachIndexed { index, source ->
+                FilterChip(
+                    selected = index == sourceIndex,
+                    onClick = { onSelectSource(index) },
+                    label = { Text(source.name) },
+                )
+            }
+        }
+        if (showClock) {
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = remember { java.time.LocalTime.now().let { t ->
+                    String.format("%02d:%02d", t.hour, t.minute)
+                } },
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
             )
         }
     }
 
-    Spacer(Modifier.height(14.dp))
+    Spacer(Modifier.height(6.dp))
 
     val description = sources.getOrNull(sourceIndex)?.description.orEmpty()
     if (description.isNotEmpty()) {
         Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(6.dp))
     }
 
     when {
@@ -663,18 +694,78 @@ private fun HomeScreen(
         failure != null -> Column {
             Text(failure, color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(10.dp))
-            Button(onClick = onRetry) { Text("Retry") }
+            Button(onClick = onRetry) { Text("Reload") }
         }
 
-        else -> ItemList(
-            items = items,
-            posterSize = posterSize,
-            titleUnder = titleUnder,
-            onOpen = onOpen,
-        )
+        else -> {
+            // home_master_recycler: one homepage_parent row per section, header + horizontal list
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                if (randomButton && sections.any { it.items.isNotEmpty() }) {
+                    item(key = "random") {
+                        // home_random ExtendedFloatingActionButton, shown when random_button_key is on
+                        val pool = sections.flatMap { it.items }
+                        Button(onClick = { pool.randomOrNull()?.let(onOpen) }) {
+                            Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Random")
+                        }
+                    }
+                }
+                sections.filter { it.items.isNotEmpty() }.forEach { section ->
+                    item(key = "header:${section.name}") {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                section.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                Icons.Outlined.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    item(key = "row:${section.name}") {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            section.items.forEach { item ->
+                                PosterCard(
+                                    item = item,
+                                    posterSize = posterSize,
+                                    titleUnder = titleUnder,
+                                    onOpen = { onOpen(item) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
+/** The upstream media-type chip row (tvtypes_chips.xml), in its order. */
+private val searchTypeChips = listOf(
+    "Movies" to ItemType.MOVIE,
+    "TV Series" to ItemType.SERIES,
+    "Anime" to ItemType.ANIME,
+    "Asian Drama" to ItemType.OTHER,
+    "Cartoons" to ItemType.OTHER,
+    "Documentaries" to ItemType.OTHER,
+    "Livestreams" to ItemType.LIVE,
+    "Torrent" to ItemType.OTHER,
+    "NSFW" to ItemType.NSFW,
+    "Others" to ItemType.OTHER,
+)
+
+/**
+ * fragment_search.xml on the desktop: the rounded search bar (search icon, clear button,
+ * filter button) with the media-type chips row underneath, results in the poster grid.
+ */
 @Composable
 private fun SearchScreen(
     query: String,
@@ -688,23 +779,92 @@ private fun SearchScreen(
     onOpen: (CatalogItem) -> Unit,
     posterSize: Int,
     titleUnder: Boolean,
+    nsfwEnabled: Boolean,
 ) {
-    Text("Search", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
-    Spacer(Modifier.height(14.dp))
+    var selectedTypes by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
+    // The bar: search field with a leading search icon, a clear button and the filter icon.
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 12.dp),
+    ) {
+        Icon(
+            Icons.Outlined.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        BasicTextField(
             value = query,
             onValueChange = onQueryChange,
-            label = { Text("Query") },
             singleLine = true,
-            modifier = Modifier.width(420.dp),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                color = MaterialTheme.colorScheme.onBackground,
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
+            modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+            decorationBox = { inner ->
+                if (query.isEmpty()) {
+                    Text(
+                        "Search…",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 16.sp,
+                    )
+                }
+                inner()
+            },
         )
-        Spacer(Modifier.width(12.dp))
-        Button(onClick = onSubmit, enabled = !searching) { Text("Search") }
+        if (searching) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+        }
+        if (query.isNotEmpty()) {
+            IconButton(onClick = { onQueryChange("") }) {
+                Icon(
+                    Icons.Outlined.Close,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
     }
 
-    Spacer(Modifier.height(16.dp))
+    Spacer(Modifier.height(10.dp))
+
+    // tvtypes_chips_scroll — the same chip labels, NSFW only when the setting allows it.
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        searchTypeChips
+            .filter { (label, _) -> label != "NSFW" || nsfwEnabled }
+            .forEach { (label, _) ->
+                FilterChip(
+                    selected = label in selectedTypes,
+                    onClick = {
+                        selectedTypes =
+                            if (label in selectedTypes) selectedTypes - label else selectedTypes + label
+                    },
+                    label = { Text(label, fontSize = 12.sp) },
+                )
+            }
+    }
+
+    Spacer(Modifier.height(12.dp))
+
+    fun matchesChips(item: CatalogItem): Boolean {
+        if (selectedTypes.isEmpty()) return true
+        val labels = searchTypeChips.filter { it.second == item.type }.map { it.first }
+        return labels.any { it in selectedTypes }
+    }
 
     when {
         searching -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -728,7 +888,7 @@ private fun SearchScreen(
                     }
                     item(key = "grid:$sourceName") {
                         ItemList(
-                            items = group,
+                            items = group.filter(::matchesChips),
                             posterSize = posterSize,
                             titleUnder = titleUnder,
                             onOpen = onOpen,
@@ -741,11 +901,65 @@ private fun SearchScreen(
         items.isEmpty() -> Text("No results yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         else -> ItemList(
-            items = items,
+            items = items.filter(::matchesChips),
             posterSize = posterSize,
             titleUnder = titleUnder,
             onOpen = onOpen,
         )
+    }
+}
+
+/**
+ * One poster cell, sized like upstream's home_result_grid.xml (125dp × 200dp artwork,
+ * bold title under the poster when *Poster title location* is on, otherwise overlaid).
+ */
+@Composable
+private fun RowScope.PosterCard(
+    item: CatalogItem,
+    posterSize: Int,
+    titleUnder: Boolean,
+    onOpen: () -> Unit,
+) {
+    val width = (125 - posterSize * 5).coerceAtLeast(60).dp
+    Column(Modifier.width(width).clickable { onOpen() }) {
+        Box(
+            Modifier.fillMaxWidth()
+                .aspectRatio(0.625f)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surface),
+        ) {
+            if (item.posterUrl != null) {
+                AsyncImage(
+                    model = item.posterUrl,
+                    contentDescription = item.title,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (!titleUnder) {
+                Text(
+                    item.title,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(6.dp),
+                )
+            }
+        }
+        if (titleUnder) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                item.title,
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+            )
+        }
     }
 }
 
@@ -760,21 +974,19 @@ private fun ItemList(
     titleUnder: Boolean,
     onOpen: (CatalogItem) -> Unit,
 ) {
-    val columns = (8 - posterSize).coerceIn(3, 8)
+    val columns = (8 - posterSize / 2).coerceIn(3, 8)
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         items(items, key = { it.url + it.title }) { item ->
-            Column(
-                Modifier.clickable { onOpen(item) },
-            ) {
+            Column(Modifier.clickable { onOpen(item) }) {
                 Box(
                     Modifier.fillMaxWidth()
-                        .aspectRatio(0.67f)
-                        .clip(RoundedCornerShape(8.dp))
+                        .aspectRatio(0.625f)
+                        .clip(RoundedCornerShape(6.dp))
                         .background(MaterialTheme.colorScheme.surface),
                 ) {
                     if (item.posterUrl != null) {
@@ -789,7 +1001,7 @@ private fun ItemList(
                             item.title,
                             color = Color.White,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 2,
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
@@ -805,7 +1017,7 @@ private fun ItemList(
                         item.title,
                         color = MaterialTheme.colorScheme.onBackground,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 2,
                     )
                     val subtitle = item.subtitle

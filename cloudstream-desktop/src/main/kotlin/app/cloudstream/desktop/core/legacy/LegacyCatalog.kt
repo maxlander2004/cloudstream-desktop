@@ -2,6 +2,7 @@ package app.cloudstream.desktop.core.legacy
 
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
+import app.cloudstream.desktop.api.HomeSection
 import app.cloudstream.desktop.api.StreamLink
 import com.lagradost.cloudstream3.AnimeLoadResponse
 import com.lagradost.cloudstream3.Episode
@@ -39,22 +40,26 @@ class LegacyCatalog(
     /** `load()` is the expensive step; the stream dialog may be reopened for the same item. */
     private val loaded = ConcurrentHashMap<String, LoadResponse>()
 
-    override suspend fun browse(): List<CatalogItem> {
-        val page = provider.mainPage.firstOrNull()
-        val response = try {
-            provider.getMainPage(
-                1,
-                MainPageRequest(
-                    page?.name ?: "",
-                    page?.data ?: "",
-                    page?.horizontalImages ?: false,
-                ),
-            )
-        } catch (e: NotImplementedError) {
-            return emptyList()
-        }
+    override suspend fun browse(): List<CatalogItem> =
+        browseSections().flatMap { it.items }
 
-        return response?.items.orEmpty().flatMap { it.list }.map { it.toCatalogItem() }
+    /**
+     * The same call chain the Android app's HomeViewModel runs: one `getMainPage` request per
+     * declared main page, each response section keeping its own name for the row header.
+     */
+    override suspend fun browseSections(): List<HomeSection> {
+        return provider.mainPage.mapNotNull { page ->
+            val response = try {
+                provider.getMainPage(
+                    1,
+                    MainPageRequest(page.name, page.data, page.horizontalImages ?: false),
+                )
+            } catch (e: NotImplementedError) {
+                return@mapNotNull null
+            }
+            val items = response?.items.orEmpty().flatMap { it.list }.map { it.toCatalogItem() }
+            HomeSection(page.name.ifBlank { provider.name }, items)
+        }.filter { it.items.isNotEmpty() }
     }
 
     override suspend fun search(query: String): List<CatalogItem> {

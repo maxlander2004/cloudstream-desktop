@@ -107,6 +107,8 @@ fun DownloadsScreen(settings: Settings, onStatus: (String) -> Unit) {
                 Text("There are currently no downloads.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            Text("Download queue", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
+            Spacer(Modifier.height(6.dp))
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),

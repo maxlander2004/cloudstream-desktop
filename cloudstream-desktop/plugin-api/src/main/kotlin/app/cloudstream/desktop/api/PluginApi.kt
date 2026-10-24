@@ -25,6 +25,13 @@ interface Catalog {
     /** Featured/landing content for this source. */
     suspend fun browse(): List<CatalogItem>
 
+    /**
+     * The home page rows of the original app: every section [MainAPI.mainPage] declares,
+     * fetched the same way `HomeViewModel` fetches them, so the desktop home screen shows the
+     * same titled, horizontally scrolling rows the phone app shows.
+     */
+    suspend fun browseSections(): List<HomeSection> = listOf(HomeSection(name, browse()))
+
     /** Query results; sources that cannot search may keep the default. */
     suspend fun search(query: String): List<CatalogItem> = emptyList()
 
@@ -37,6 +44,12 @@ interface Catalog {
  * Providers settings (preferred media, NSFW filter) exactly like the Android app uses them.
  */
 enum class ItemType { MOVIE, SERIES, ANIME, LIVE, NSFW, OTHER }
+
+/** One home row: a section title and its posters, like upstream's `HomePageList`. */
+data class HomeSection(
+    val name: String,
+    val items: List<CatalogItem>,
+)
 
 data class CatalogItem(
     val title: String,
