@@ -73,6 +73,18 @@ tasks.register<JavaExec>("verifyLegacy") {
     classpath = sourceSets["test"].runtimeClasspath
 }
 
+/**
+ * Runs the updater's own code path against this project's published releases: the release the
+ * Settings screen offers, and whether an install on the previous release is told the current
+ * version is newer. Needs network access and a release for AppVersion to be published.
+ */
+tasks.register<JavaExec>("verifyUpdater") {
+    group = "verification"
+    description = "Check the in-app updater against the published GitHub releases"
+    mainClass = "app.cloudstream.desktop.UpdaterSmokeKt"
+    classpath = sourceSets["test"].runtimeClasspath
+}
+
 // Skiko (Compose's renderer) needs native access on modern JDKs.
 tasks.withType<JavaExec> {
     jvmArgs("--enable-native-access=ALL-UNNAMED")

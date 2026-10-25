@@ -210,6 +210,23 @@ Sources that require a `Referer` (most extension scrapers) get it forwarded: `mp
 `--http-header-fields=…` and VLC `--http-referrer=…`. Players that take no headers still get
 the bare URL.
 
+## Updates
+
+The app checks this repository's own GitHub releases for the update banner shown at startup
+and for Settings → **Updates and Backup**: `releases/latest`, or the release list when
+**Install pre-release version** is on. `AppVersion.VALUE` is compared against the published
+tag, so a build is only ever offered an update genuinely newer than itself.
+
+```bash
+./gradlew verifyUpdater    # the updater's own code path against the published releases
+```
+
+`verifyUpdater` needs network access and a release for the current `AppVersion` to be
+published already (run it after a release, not on the build creating one). It asserts that
+the release on offer is this build's, that this build is not told to update to itself, that
+an install on the previous release is offered the current one, and that the prerelease
+toggle's endpoint answers.
+
 ## Layout
 
 ```
