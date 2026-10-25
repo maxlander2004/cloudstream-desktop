@@ -35,8 +35,18 @@ interface Catalog {
     /** Query results; sources that cannot search may keep the default. */
     suspend fun search(query: String): List<CatalogItem> = emptyList()
 
+    /**
+     * The seasons and episodes of a series — the list the original app's result screen shows
+     * after you tap a poster. Movies, live streams and sources that cannot report episodes keep
+     * the default empty list and play straight through [streams].
+     */
+    suspend fun episodeGroups(item: CatalogItem): List<EpisodeGroup> = emptyList()
+
     /** Playable links for an item. */
     suspend fun streams(item: CatalogItem): List<StreamLink>
+
+    /** Playable links for one [episode] of a series; the default covers sources without episodes. */
+    suspend fun streams(item: CatalogItem, episode: Episode): List<StreamLink> = streams(item)
 }
 
 /**
@@ -49,6 +59,45 @@ enum class ItemType { MOVIE, SERIES, ANIME, LIVE, NSFW, OTHER }
 data class HomeSection(
     val name: String,
     val items: List<CatalogItem>,
+)
+
+/**
+ * One episode of a series, the desktop counterpart of upstream's `ResultEpisode`. The fields
+ * are exactly the ones the original lays out on an episode row.
+ */
+data class Episode(
+    /** Opaque id handed back to [Catalog.streams] so the source can resolve this episode. */
+    val data: String,
+    /** Episode number; drives the "Episode 1" / "1. Jobless" label. */
+    val episode: Int,
+    /** Episode title when the source has one, as upstream's `Episode.name`. */
+    val name: String? = null,
+    val season: Int? = null,
+    /** Episode still, shown in the large row. */
+    val posterUrl: String? = null,
+    /** Episode synopsis, the four-line description under the row. */
+    val overview: String? = null,
+    /** Rating out of 10, rendered as the original's "Rated: 8.8". */
+    val rating: Double? = null,
+    /** Air date in epoch milliseconds. */
+    val airDate: Long? = null,
+    /** Runtime in minutes, rendered as the original's "80min". */
+    val runTime: Int? = null,
+    /** Marks the row with the original's "Filler" chip. */
+    val isFiller: Boolean = false,
+) {
+    /** The label the original builds: "Episode 1" without a name, "1. Jobless" with one. */
+    val label: String
+        get() = if (name.isNullOrBlank()) "Episode $episode" else "$episode. $name"
+}
+
+/**
+ * A season of a series, or the Sub/Dub list of an anime — one entry of the episode picker.
+ */
+data class EpisodeGroup(
+    /** "Season 1" for a series, "Sub"/"Dub" for an anime, as the original's selector shows. */
+    val label: String,
+    val episodes: List<Episode>,
 )
 
 data class CatalogItem(

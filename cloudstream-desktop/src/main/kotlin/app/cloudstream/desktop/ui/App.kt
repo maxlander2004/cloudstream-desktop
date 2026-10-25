@@ -1,6 +1,7 @@
 package app.cloudstream.desktop.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -29,16 +30,21 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,7 +52,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -62,12 +70,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
+import app.cloudstream.desktop.api.Episode
+import app.cloudstream.desktop.api.EpisodeGroup
 import app.cloudstream.desktop.api.HomeSection
 import app.cloudstream.desktop.api.ItemType
 import app.cloudstream.desktop.api.StreamLink
@@ -95,6 +107,11 @@ import java.awt.Frame
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.text.DateFormat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 private enum class Screen(val label: String, val icon: ImageVector) {
     Home("Home", Icons.Outlined.Home),
@@ -139,8 +156,15 @@ fun App() {
     var fetchedFrom by remember { mutableStateOf<List<String>?>(null) }
 
     var activeItem by remember { mutableStateOf<CatalogItem?>(null) }
+    var activeEpisode by remember { mutableStateOf<Episode?>(null) }
     var streams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
+    var selectedSource by remember { mutableStateOf(0) }
     var resolving by remember { mutableStateOf(false) }
+
+    // The original's result screen: open for a series, closed with the back arrow.
+    var detailItem by remember { mutableStateOf<CatalogItem?>(null) }
+    var detailGroups by remember { mutableStateOf<List<EpisodeGroup>>(emptyList()) }
+    var detailGroup by remember { mutableStateOf(0) }
 
     var updateBanner by remember { mutableStateOf<UpdateCheck?>(null) }
 
@@ -370,22 +394,77 @@ fun App() {
         }
     }
 
-    fun openStreams(item: CatalogItem) {
+    fun openStreams(item: CatalogItem, episode: Episode?) {
         val target = current ?: return
         scope.launch {
             resolving = true
             activeItem = item
+            activeEpisode = episode
+            selectedSource = 0
             streams = emptyList()
-            runCatching { withContext(Dispatchers.IO) { target.catalog.streams(item) } }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    if (episode == null) target.catalog.streams(item)
+                    else target.catalog.streams(item, episode)
+                }
+            }
                 .onSuccess {
                     streams = it
                     if (it.isEmpty()) status = "No streams returned for ${item.title}"
                 }
                 .onFailure {
-                    failure = it.message ?: "Could not resolve streams"
+                    val message = it.message ?: "Could not resolve streams"
+                    failure = message
+                    // The detail screen shows no error banner, so the status line carries it.
+                    status = message
                     activeItem = null
                 }
             resolving = false
+        }
+    }
+
+    /**
+     * Tapping a poster does what the original does: a series opens its result screen with the
+     * season picker and the episode list, anything else goes straight to picking a source.
+     */
+    fun openItem(item: CatalogItem) {
+        val target = current ?: return
+        scope.launch {
+            val groups = runCatching {
+                withContext(Dispatchers.IO) { target.catalog.episodeGroups(item) }
+            }.getOrElse { emptyList() }
+            if (groups.isEmpty()) {
+                openStreams(item, null)
+            } else {
+                detailItem = item
+                detailGroups = groups
+                detailGroup = 0
+                status = "${groups.sumOf { it.episodes.size }} episode(s) for ${item.title}"
+            }
+        }
+    }
+
+    /**
+     * The episode row's download button, which upstream's PieFetchButton turns into a queued
+     * download: resolve the episode's links and queue the first one the source returns.
+     */
+    fun downloadEpisode(item: CatalogItem, episode: Episode) {
+        val target = current ?: return
+        scope.launch {
+            val links = runCatching {
+                withContext(Dispatchers.IO) { target.catalog.streams(item, episode) }
+            }.getOrElse {
+                status = "Could not resolve ${episode.label}: ${it.message}"
+                return@launch
+            }
+            val link = links.firstOrNull()
+            if (link == null) {
+                status = "No streams returned for ${episode.label}"
+                return@launch
+            }
+            val title = "${item.title} · ${episode.label}"
+            DownloadManager.add(settings = settings, title = title, url = link.url, headers = link.headers)
+            status = "Queued $title"
         }
     }
 
@@ -456,7 +535,23 @@ fun App() {
             Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surfaceVariant))
 
             Column(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp)) {
-                when (screen) {
+                val detail = detailItem
+                if (detail != null) {
+                    DetailScreen(
+                        modifier = Modifier.weight(1f),
+                        item = detail,
+                        groups = detailGroups,
+                        groupIndex = detailGroup,
+                        onGroupIndex = { detailGroup = it },
+                        onBack = { detailItem = null },
+                        onSearch = {
+                            detailItem = null
+                            screen = Screen.Search
+                        },
+                        onPlay = { episode -> openStreams(detail, episode) },
+                        onDownload = { episode -> downloadEpisode(detail, episode) },
+                    )
+                } else when (screen) {
                     Screen.Home -> {
                         updateBanner?.let { info ->
                             Row(
@@ -491,7 +586,7 @@ fun App() {
                             loading = loading,
                             failure = failure,
                             onRetry = ::loadBrowse,
-                            onOpen = ::openStreams,
+                            onOpen = ::openItem,
                             posterSize = settings.posterSize,
                             titleUnder = settings.posterTitleUnder,
                             randomButton = settings.randomButton,
@@ -508,7 +603,7 @@ fun App() {
                         searchGroups = searchGroups,
                         advanced = settings.advancedSearch,
                         failure = failure,
-                        onOpen = ::openStreams,
+                        onOpen = ::openItem,
                         posterSize = settings.posterSize,
                         titleUnder = settings.posterTitleUnder,
                         nsfwEnabled = settings.nsfwEnabled,
@@ -587,46 +682,125 @@ fun App() {
         if (item != null) {
             AlertDialog(
                 onDismissRequest = { activeItem = null },
-                title = { Text(item.title) },
+                title = {
+                    Text(
+                        activeEpisode?.let { "${item.title} · ${it.label}" } ?: item.title,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                },
                 text = {
-                    if (resolving) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(12.dp))
-                            Text("Resolving streams…")
-                        }
-                    } else {
-                        LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                            items(streams) { stream ->
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    TextButton(
-                                        onClick = {
-                                            status = Player.open(stream, settings.playerCommand)
-                                            activeItem = null
-                                        },
-                                    ) {
-                                        Text(stream.title, modifier = Modifier.padding(end = 8.dp))
-                                    }
-                                    TextButton(
-                                        onClick = {
-                                            DownloadManager.add(
-                                                settings = settings,
-                                                title = "${item.title} · ${stream.title}",
-                                                url = stream.url,
-                                                headers = stream.headers,
+                    Column(Modifier.fillMaxWidth()) {
+                        if (resolving) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(
+                                    Modifier.height(18.dp).width(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text("Resolving streams…")
+                            }
+                        } else if (streams.isEmpty()) {
+                            Text(
+                                "No streams returned for ${item.title}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            // player_select_source_and_subs.xml: the bold "Sources" header
+                            // (pick_source) with its settings button above the choice list.
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Sources",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                IconButton(
+                                    onClick = {
+                                        activeItem = null
+                                        detailItem = null
+                                        screen = Screen.Settings
+                                        settingsPage = SettingsPage.Player
+                                    },
+                                ) {
+                                    Icon(Icons.Outlined.Settings, contentDescription = "Source settings")
+                                }
+                            }
+
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 320.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .background(MaterialTheme.colorScheme.surface),
+                            ) {
+                                streams.forEachIndexed { index, stream ->
+                                    val selected = index == selectedSource
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { selectedSource = index }
+                                            .background(
+                                                if (selected) MaterialTheme.colorScheme.surfaceVariant
+                                                else Color.Transparent,
                                             )
-                                            status = "Queued ${item.title}"
-                                            activeItem = null
-                                            screen = Screen.Downloads
-                                        },
-                                    ) { Text("Download") }
+                                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                                    ) {
+                                        RadioButton(
+                                            selected = selected,
+                                            onClick = { selectedSource = index },
+                                        )
+                                        Text(
+                                            stream.title,
+                                            color = MaterialTheme.colorScheme.onBackground,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f).padding(end = 4.dp),
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                DownloadManager.add(
+                                                    settings = settings,
+                                                    title = "${item.title} · ${stream.title}",
+                                                    url = stream.url,
+                                                    headers = stream.headers,
+                                                )
+                                                status = "Queued ${item.title}"
+                                                activeItem = null
+                                                screen = Screen.Downloads
+                                            },
+                                        ) {
+                                            Icon(Icons.Outlined.Download, contentDescription = "Download")
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 },
+                // apply_btt then cancel_btt, the order the original's button row uses.
                 confirmButton = {
-                    TextButton(onClick = { activeItem = null }) { Text("Close") }
+                    Row {
+                        Button(
+                            enabled = !resolving && streams.isNotEmpty(),
+                            onClick = {
+                                streams.getOrNull(selectedSource)?.let {
+                                    status = Player.open(it, settings.playerCommand)
+                                }
+                                activeItem = null
+                            },
+                        ) { Text("Apply") }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = { activeItem = null }) { Text("Cancel") }
+                    }
                 },
             )
         }
@@ -744,6 +918,296 @@ private fun HomeScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Upstream's `secondsToReadable`: "1h 20m", the runtime line on a large episode card. */
+private fun secondsToReadable(seconds: Int): String {
+    var rest = seconds.toLong()
+    val days = TimeUnit.SECONDS.toDays(rest)
+    rest -= TimeUnit.DAYS.toSeconds(days)
+    val hours = TimeUnit.SECONDS.toHours(rest)
+    rest -= TimeUnit.HOURS.toSeconds(hours)
+    val minutes = TimeUnit.SECONDS.toMinutes(rest)
+    return buildString {
+        if (days != 0L) append(days).append("d ")
+        if (hours != 0L) append(hours).append("h ")
+        append(minutes).append("m")
+    }
+}
+
+/** The original's small "Filler" button (SmallWhiteButton + R.string.filler). */
+@Composable
+private fun FillerChip() {
+    Box(
+        Modifier
+            .background(
+                MaterialTheme.colorScheme.onBackground.copy(alpha = 0.12f),
+                RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        Text("Filler", fontSize = 11.sp, color = MaterialTheme.colorScheme.onBackground)
+    }
+}
+
+/**
+ * The original's result screen (fragment_result.xml): the back bar, the poster + title + meta
+ * header, the season picker and the episode list. Every string is the upstream one.
+ */
+@Composable
+private fun DetailScreen(
+    modifier: Modifier = Modifier,
+    item: CatalogItem,
+    groups: List<EpisodeGroup>,
+    groupIndex: Int,
+    onGroupIndex: (Int) -> Unit,
+    onBack: () -> Unit,
+    onSearch: () -> Unit,
+    onPlay: (Episode) -> Unit,
+    onDownload: (Episode) -> Unit,
+) {
+    val group = groups.getOrNull(groupIndex) ?: groups.firstOrNull()
+    var seasonMenu by remember { mutableStateOf(false) }
+
+    Column(modifier.fillMaxSize()) {
+        // result_back on the left, result_openinbrower + result_search on the right.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Outlined.ArrowBack, contentDescription = "Back")
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { runCatching { Desktop.getDesktop().browse(URI(item.url)) } }) {
+                Icon(Icons.Outlined.OpenInNew, contentDescription = "Open in browser")
+            }
+            IconButton(onClick = onSearch) {
+                Icon(Icons.Outlined.Search, contentDescription = "Search")
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
+
+        // result_poster, result_title and the result_meta_type / result_meta_site line.
+        Row(verticalAlignment = Alignment.Top) {
+            AsyncImage(
+                model = item.posterUrl,
+                contentDescription = item.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .width(125.dp)
+                    .height(200.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp)),
+            )
+            Spacer(Modifier.width(20.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    item.title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val kind = item.type.name.lowercase().replaceFirstChar { it.uppercase() }
+                    Text(kind, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    if (!item.subtitle.isNullOrBlank()) {
+                        Text(
+                            "  ·  ${item.subtitle}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        // result_season_button + result_episodes_text, side by side as in the FlowLayout.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            if (groups.size > 1) {
+                Box {
+                    OutlinedButton(onClick = { seasonMenu = true }) {
+                        Text(group?.label ?: "Season 1")
+                        Icon(Icons.Outlined.ArrowDropDown, contentDescription = null)
+                    }
+                    DropdownMenu(expanded = seasonMenu, onDismissRequest = { seasonMenu = false }) {
+                        groups.forEachIndexed { index, entry ->
+                            DropdownMenuItem(
+                                text = { Text(entry.label) },
+                                onClick = {
+                                    seasonMenu = false
+                                    onGroupIndex(index)
+                                },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.width(14.dp))
+            }
+            Text(
+                "${group?.episodes?.size ?: 0} Episodes",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 17.sp,
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        val episodes = group?.episodes.orEmpty()
+        if (episodes.isEmpty()) {
+            Text("No Episodes found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(episodes) { episode ->
+                    EpisodeRow(
+                        episode = episode,
+                        onPlay = { onPlay(episode) },
+                        onDownload = { onDownload(episode) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One episode row. Episodes with a still or a synopsis get the original's large card
+ * (result_episode_large.xml); the rest get its 50dp compact row (result_episode.xml) — the
+ * same split `EpisodeAdapter` makes.
+ */
+@Composable
+private fun EpisodeRow(
+    episode: Episode,
+    onPlay: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val large = !episode.posterUrl.isNullOrBlank() || !episode.overview.isNullOrBlank()
+
+    if (!large) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, outline, RoundedCornerShape(8.dp))
+                .clickable { onPlay() }
+                .padding(horizontal = 8.dp),
+        ) {
+            Icon(Icons.Outlined.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            if (episode.isFiller) {
+                Spacer(Modifier.width(8.dp))
+                FillerChip()
+            }
+            Text(
+                episode.label,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(start = 10.dp),
+            )
+            IconButton(onClick = onDownload) {
+                Icon(Icons.Outlined.Download, contentDescription = "Download", tint = muted)
+            }
+        }
+        return
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, outline, RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { onPlay() }
+            .padding(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .width(126.dp)
+                    .height(72.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                episode.posterUrl?.let {
+                    AsyncImage(
+                        model = it,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                Icon(
+                    Icons.Outlined.PlayArrow,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.align(Alignment.Center).size(30.dp),
+                )
+            }
+            Spacer(Modifier.width(15.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (episode.isFiller) {
+                        FillerChip()
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Text(
+                        episode.label,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                val rating = episode.rating
+                val runTime = episode.runTime
+                if (rating != null || runTime != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (rating != null) {
+                            Text("Rated: ${"%.1f".format(rating)}", color = muted, fontSize = 12.sp)
+                        }
+                        if (runTime != null) {
+                            if (rating != null) Spacer(Modifier.width(10.dp))
+                            Text(secondsToReadable(runTime * 60), color = muted, fontSize = 12.sp)
+                        }
+                    }
+                }
+                episode.airDate?.let { airDate ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        remember(airDate) {
+                            SimpleDateFormat.getDateInstance(DateFormat.LONG, Locale.getDefault())
+                                .format(Date(airDate))
+                        },
+                        color = muted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            IconButton(onClick = onDownload) {
+                Icon(Icons.Outlined.Download, contentDescription = "Download", tint = muted)
+            }
+        }
+
+        episode.overview?.takeIf { it.isNotBlank() }?.let { overview ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                overview,
+                color = muted,
+                fontSize = 13.sp,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

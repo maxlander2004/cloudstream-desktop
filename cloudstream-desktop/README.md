@@ -98,8 +98,8 @@ row is empty without a sign-in. None of them are caused by the desktop loader.
 
 What does *not* work, and cannot without rework: extensions that need Android-only services.
 `WebView`/`Cloudflare` bypass (`WebViewResolver` is a no-op on the JVM), `Resources`, and
-Android `Context` access. Series and anime providers currently resolve links for the **first
-episode** only — episode selection is not in the UI yet.
+Android `Context` access. Series and anime open the original's result screen — poster, season
+picker, episode list — and resolve links for the episode you pick.
 
 ### Installing an extension
 
