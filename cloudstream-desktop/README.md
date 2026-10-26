@@ -98,8 +98,8 @@ row is empty without a sign-in. None of them are caused by the desktop loader.
 
 What does *not* work, and cannot without rework: extensions that need Android-only services.
 `WebView`/`Cloudflare` bypass (`WebViewResolver` is a no-op on the JVM), `Resources`, and
-Android `Context` access. Series and anime providers currently resolve links for the **first
-episode** only — episode selection is not in the UI yet.
+Android `Context` access. Series and anime open the original's result screen — poster, season
+picker, episode list — and resolve links for the episode you pick.
 
 ### Installing an extension
 
@@ -210,7 +210,34 @@ Sources that require a `Referer` (most extension scrapers) get it forwarded: `mp
 `--http-header-fields=…` and VLC `--http-referrer=…`. Players that take no headers still get
 the bare URL.
 
-## Layout
+## Updates
+
+The app checks this repository's own GitHub releases for the update banner shown at startup
+and for Settings → **Updates and Backup**: `releases/latest`, or the release list when
+**Install pre-release version** is on. `AppVersion.VALUE` is compared against the published
+tag, so a build is only ever offered an update genuinely newer than itself.
+
+```bash
+./gradlew verifyUpdater    # the updater's own code path against the published releases
+```
+
+`verifyUpdater` needs network access and a release for the current `AppVersion` to be
+published already (run it after a release, not on the build creating one). It asserts that
+the release on offer is this build's, that this build is not told to update to itself, that
+an install on the previous release is offered the current one, and that the prerelease
+toggle's endpoint answers.
+
+## Migration Strategy Table
+
+| Feature Category | Android Implementation | Desktop/JVM Implementation | Status |
+|---|---|---|---|
+| **Plugin / Script System** | `.cs` / `.cs3` archives loaded via `dalvik.system.PathClassLoader`, translated to JVM bytecode via dex2jar, loaded through `LegacyExtensions.load()` which instantiates `BasePlugin` and registers providers through `APIHolder`. Extensions compiled against Android `com.lagradost.cloudstream3.*` API. | JVM bytecode translation via dex2jar (`:cs-compat` DexTranslator), `URLClassLoader` loading of `manifest.json`-based `.jar` extensions implementing `Catalog` API. `expect/actual` declarations in `cs-compat` provide binary-compatible `com.lagradost.cloudstream3.*` types. Extensions load via `ExtensionHost.loadNative()` (`.jar`) or `LegacyExtensions.load()` (`.cs`/`.cs3`). | ✅ Working — existing code loads `.cs3`/`.cs` archives via dex2jar + legacy loader. Native `.jar` extensions supported via `ExtensionHost.loadNative()`. |
+| **Media Player System** | ExoPlayer (Media3) embedded in single-activity Android UI. Playback speed, subtitle grouping, intro/outro skip, Chromecast, gesture controls. | Embedded JVM player via VLCJ or MPV wrapper into Compose UI. `expect/actual` for `Player` abstraction. Player command configured via Settings (`player.command` flag). Referer headers forwarded to players. Falls back to browser. | 🔄 In progress — Player abstraction exists in `core/Player.kt`; needs VLCJ/MPV wrapper integration into Compose UI. Referer forwarding already implemented. |
+| **Download Manager** | Android `WorkManager` with parallel/concurrent connections, ranged downloads, progress tracking in UI. | JVM-based `DownloadManager` with `Semaphore` for parallel downloads, ranged/connections, progress tracking via `StateFlow<DownloadTask>`. HttpClient-based downloading with ranged support. Disk usage reporting. | ✅ Working — `DownloadManager.kt` implements parallel downloads, ranged connections, progress tracking, and pause/resume/cancel per queue row (pause parks the transfer between buffers, so resume keeps the bytes already written). |
+| **Library & Watch Status** | DataStore bookmarks with a `WatchType` status, favorites and subscriptions; `LocalList` turns them into the Library's tabs; recent queries go in a search history list. | `core/Library.kt` keeps the same statuses, favorites and subscriptions in `library.json`; `core/SearchHistory.kt` keeps the recent searches; the Library tab lists the same pages `LocalList` does. | ✅ Working — library tabs (Watching, Completed, On-Hold, Dropped, Plan to Watch, Favorites, Subscribed), sort, random button, bookmark/favorite/subscribe controls on the result screen, search history. |
+| **Casting / Remote** | Chromecast session management, Android TV D-pad/remote input. | Chromecast/FCast via JVM libraries (e.g., libmpv with casting support). Android TV remote mapped to keyboard shortcuts (arrows=navigate, select=select, etc.). | 🔄 Partially working — keyboard shortcut mapping concept exists; Chromecast support needs JVM library integration. |
+| **Data & Backup** | `DataStore`/`SharedPreferences` serialization to JSON via `BackupUtils`. | Properties file (`settings.properties`) with timestamped zip backup/restore. Same semantic keys as upstream. | ✅ Working — existing `Backup.kt` and `Settings.kt` implement settings persistence and zip-based backup/restore. |
+| **UI Parity (MVI + Navigation)** | Single-activity with fragments, BottomNavigationView (phone), NavigationRail (TV/Tablet). MVI with `PersistentList`, immutable state. | Compose Multiplatform with `NavigationRail` for laptop frame. Same MVI architecture with `PersistentList`/immutable state. All themes (Dark, AMOLED, Material You, custom poster sizes) preserved via `Theme.kt`. UI rows match original layout. | ✅ Working — Compose UI ports all original settings rows, themes, and navigation structure. |
 
 ```
 plugin-api/                        Catalog / CatalogItem / StreamLink; what extensions compile against
@@ -227,8 +254,11 @@ src/main/kotlin/app/cloudstream/desktop/
   core/IptvSource.kt       built-in public IPTV source
   core/Http.kt             JDK HTTP client wrapper
   core/Player.kt           external player + settings
+  core/Library.kt          watch statuses, favorites and subscriptions (LocalList's pages)
+  core/SearchHistory.kt    recent searches shown under an empty search field
   ui/Theme.kt              upstream dark palette
-  ui/App.kt                navigation, browse, search, extensions, settings
+  ui/App.kt                navigation, browse, search, library, extensions, settings
+  ui/LibraryScreen.kt      library tabs, sort, random button
 ```
 
 `cs-compat` does not copy or rewrite anything: it points its source sets at

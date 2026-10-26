@@ -255,7 +255,7 @@ class SettingsBackupTest {
         settings.autoDownloadPlugins = true
         settings.githubProxy = true
         settings.cloneSite = "https://a.example=https://b.example"
-        settings.doh = "cloudflare"
+        settings.dns = "cloudflare"
 
         val reloaded = Settings()
         assertEquals(7, reloaded.parallelDownloads)
@@ -271,7 +271,7 @@ class SettingsBackupTest {
         assertTrue(reloaded.autoDownloadPlugins)
         assertTrue(reloaded.githubProxy)
         assertEquals("https://a.example=https://b.example", reloaded.cloneSite)
-        assertEquals("cloudflare", reloaded.doh)
+        assertEquals("cloudflare", reloaded.dns)
     }
 
     @Test
