@@ -7,41 +7,35 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.DownloadState
+import app.cloudstream.desktop.core.DownloadTask
 import app.cloudstream.desktop.ui.App
 import java.awt.Dimension
 import androidx.compose.runtime.*
 
+/** The window title mirrors the queue: what is downloading, or how much is held up. */
+internal fun computeTitle(tasks: List<DownloadTask>): String {
+    val running = tasks.count { it.state == DownloadState.RUNNING }
+    val queued = tasks.count { it.state == DownloadState.QUEUED }
+    val paused = tasks.count { it.state == DownloadState.PAUSED }
+    if (running > 0) {
+        val task = tasks.first { it.state == DownloadState.RUNNING }
+        val percent = if (task.totalBytes > 0) {
+            (task.doneBytes.toDouble() / task.totalBytes * 100).toInt().coerceIn(0, 100)
+        } else {
+            0
+        }
+        return "CloudStream - downloading ${task.title} ($percent%)"
+    }
+    if (paused > 0) return "CloudStream - $paused paused"
+    if (queued > 0) return "CloudStream - $queued queued"
+    return "CloudStream"
+}
+
 fun main() = application {
     var title by remember { mutableStateOf("CloudStream") }
-    val tasks by remember { mutableStateOf<List<DownloadManager.DownloadTask>>(emptyList()) }
     LaunchedEffect(Unit) {
-        tasks = DownloadManager.tasks.value
-        DownloadManager.tasks.collect { newTasks ->
-            if (tasks != newTasks) {
-                tasks = newTasks
-                title = computeTitle(newTasks)
-            }
-        }
+        DownloadManager.tasks.collect { tasks -> title = computeTitle(tasks) }
     }
-
-    fun computeTitle(tasks: List<DownloadManager.DownloadTask>): String {
-        val running = tasks.count { it.state == DownloadState.RUNNING }
-        val queued = tasks.count { it.state == DownloadState.QUEUED }
-        val paused = tasks.count { it.state == DownloadState.PAUSED }
-        if (running > 0) {
-            val task = tasks.first { it.state == DownloadState.RUNNING }
-            val percent = if (task.totalBytes > 0) (task.doneBytes.toFloat() / task.totalBytes * 100).coerceIn(0f, 100f).toInt() else 0
-            return "CloudStream - downloading ${task.title} ($percent%)"
-        } else if (paused > 0) {
-            return "CloudStream - ${paused} paused"
-        } else if (queued > 0) {
-            return "CloudStream - ${queued} queued"
-        }
-        return "CloudStream"
-    }
-
-    // Restore previously saved download queue on startup.
-    DownloadManager.restoreOnStartup(Settings())
 
     Window(
         onCloseRequest = ::exitApplication,
