@@ -81,6 +81,12 @@ object DownloadManager {
     private val jobs = ConcurrentHashMap<String, Job>()
     /** Per-chunk byte counts of a ranged download, kept across pause/resume cycles. */
     private val chunkProgress = ConcurrentHashMap<String, ConcurrentHashMap<Int, Long>>()
+    /**
+     * Files a cancelled download should delete once its coroutine lets go of them. Windows
+     * cannot unlink a file another handle still has open, so cancel's first attempt can fail
+     * there and the deletion is retried when the job completes.
+     */
+    private val pendingDeletes = ConcurrentHashMap<String, Path>()
 
     private fun mutate(transform: (List<DownloadTask>) -> List<DownloadTask>) {
         while (true) {
@@ -136,12 +142,17 @@ object DownloadManager {
      * file is deleted; a finished one is only dropped from the list, its file is kept.
      */
     fun cancel(id: String) {
-        jobs.remove(id)?.cancel()
         val registration = registrations.remove(id)
         chunkProgress.remove(id)
+        // Register the pending delete before cancelling: the job's completion handler is then
+        // guaranteed to see it and retry once the coroutine has closed its file handles.
+        if (registration != null) pendingDeletes[id] = registration.target
+        jobs.remove(id)?.cancel()
         mutate { list -> list.filterNot { it.id == id } }
         if (registration != null && _tasks.value.none { it.id == id }) {
-            runCatching { registration.target.deleteIfExists() }
+            if (runCatching { Files.deleteIfExists(registration.target) }.getOrDefault(false)) {
+                pendingDeletes.remove(id)
+            }
         }
     }
 
@@ -201,7 +212,12 @@ object DownloadManager {
             }
         }
         jobs[id] = job
-        job.invokeOnCompletion { jobs.remove(id, job) }
+        job.invokeOnCompletion {
+            jobs.remove(id, job)
+            // A cancelled download's first delete may have failed on Windows while the
+            // coroutine still held the file open; now the handles are closed, retry it.
+            pendingDeletes.remove(id)?.let { target -> runCatching { Files.deleteIfExists(target) } }
+        }
     }
 
     /** Downloads with ranged parallel connections when the server supports them. */
