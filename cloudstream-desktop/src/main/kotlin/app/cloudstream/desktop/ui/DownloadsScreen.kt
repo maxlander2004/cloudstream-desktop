@@ -15,10 +15,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -114,9 +118,16 @@ fun DownloadsScreen(settings: Settings, onStatus: (String) -> Unit) {
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
             ) {
                 items(tasks, key = { it.id }) { task ->
-                    DownloadRow(task = task, onPlay = {
-                        onStatus(Player.open(StreamLink(task.title, task.url), settings.playerCommand))
-                    })
+                    DownloadRow(
+                        task = task,
+                        onPlay = {
+                            onStatus(Player.open(StreamLink(task.title, task.url), settings.playerCommand))
+                        },
+                        onPause = { DownloadManager.pause(task.id) },
+                        onResume = { DownloadManager.resume(task.id) },
+                        onCancel = { DownloadManager.cancel(task.id) },
+                        onRetry = { DownloadManager.retry(task.id, settings) },
+                    )
                 }
             }
         }
@@ -181,7 +192,17 @@ private fun LegendDot(color: androidx.compose.ui.graphics.Color) {
 }
 
 @Composable
-private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
+private fun DownloadRow(
+    task: DownloadTask,
+    onPlay: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val inFlight = task.state == DownloadState.QUEUED ||
+        task.state == DownloadState.RUNNING ||
+        task.state == DownloadState.PAUSED
     Column(
         Modifier
             .fillMaxWidth()
@@ -197,6 +218,13 @@ private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
                     DownloadState.RUNNING ->
                         "${task.fileName} · ${formatBytes(task.doneBytes)}" +
                             (if (task.totalBytes > 0) " / ${formatBytes(task.totalBytes)}" else "")
+                    DownloadState.PAUSED ->
+                        "${task.fileName} · Paused" +
+                            if (task.totalBytes > 0) {
+                                " · ${formatBytes(task.doneBytes)} / ${formatBytes(task.totalBytes)}"
+                            } else {
+                                " · ${formatBytes(task.doneBytes)}"
+                            }
                     DownloadState.DONE -> "${task.fileName} · ${formatBytes(task.totalBytes)}"
                     DownloadState.FAILED -> task.error ?: "Download failed"
                 }
@@ -213,8 +241,30 @@ private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
             if (task.state == DownloadState.DONE) {
                 TextButton(onClick = onPlay) { Text("Play") }
             }
+            // Pause/resume on the left of the stop button, like the original's queue row.
+            if (inFlight) {
+                IconButton(onClick = if (task.state == DownloadState.PAUSED) onResume else onPause) {
+                    Icon(
+                        if (task.state == DownloadState.PAUSED) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
+                        contentDescription = if (task.state == DownloadState.PAUSED) "Resume" else "Pause",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            IconButton(onClick = onCancel) {
+                Icon(
+                    Icons.Outlined.Close,
+                    contentDescription = if (inFlight) "Cancel download" else "Remove from queue",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // Retry button for failed downloads.
+            if (task.state == DownloadState.FAILED) {
+                TextButton(onClick = onRetry) { Text("Retry") }
+            }
         }
-        if (task.state == DownloadState.RUNNING) {
+        // A paused download keeps its bar, so the progress it will resume from stays visible.
+        if (task.state == DownloadState.RUNNING || task.state == DownloadState.PAUSED) {
             Spacer(Modifier.height(6.dp))
             LinearProgressIndicator(
                 progress = { task.progress },

@@ -32,10 +32,16 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
@@ -59,6 +65,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -90,9 +97,12 @@ import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.ExtensionLoadResult
 import app.cloudstream.desktop.core.ExtensionRepository
 import app.cloudstream.desktop.core.IptvSource
+import app.cloudstream.desktop.core.Library
 import app.cloudstream.desktop.core.Player
 import app.cloudstream.desktop.core.RepositoryPlugin
 import app.cloudstream.desktop.core.RepositorySet
+import app.cloudstream.desktop.core.SearchHistory
+import app.cloudstream.desktop.core.SearchHistoryEntry
 import app.cloudstream.desktop.core.Settings
 import app.cloudstream.desktop.core.UpdateCheck
 import coil3.compose.AsyncImage
@@ -115,6 +125,7 @@ import java.util.concurrent.TimeUnit
 
 private enum class Screen(val label: String, val icon: ImageVector) {
     Home("Home", Icons.Outlined.Home),
+    Library("Library", Icons.Outlined.Bookmarks),
     Search("Search", Icons.Outlined.Search),
     Downloads("Downloads", Icons.Outlined.Download),
     Settings("Settings", Icons.Outlined.Settings),
@@ -165,8 +176,16 @@ fun App() {
     var detailItem by remember { mutableStateOf<CatalogItem?>(null) }
     var detailGroups by remember { mutableStateOf<List<EpisodeGroup>>(emptyList()) }
     var detailGroup by remember { mutableStateOf(0) }
+    // The source the open item came from, so its episodes resolve against the same provider
+    // even when it was opened from the Library rather than the Home screen.
+    var detailSource by remember { mutableStateOf<SourceEntry?>(null) }
+    var activeSource by remember { mutableStateOf<SourceEntry?>(null) }
 
     var updateBanner by remember { mutableStateOf<UpdateCheck?>(null) }
+
+    // LocalList's pages and the original's search history, both persisted next to the settings.
+    val library by Library.entries.collectAsState()
+    val searchHistory by SearchHistory.entries.collectAsState()
 
     // Filtered by the Providers settings: extension languages, preferred media, NSFW.
     val allSources = remember(extensions) {
@@ -356,6 +375,8 @@ fun App() {
 
     fun runSearch() {
         if (query.isBlank()) return
+        // search/SearchViewModel.kt stores every submitted query in the history list.
+        SearchHistory.record(query)
         val targets = if (settings.advancedSearch) sources else listOfNotNull(current)
         scope.launch {
             searching = true
@@ -394,12 +415,13 @@ fun App() {
         }
     }
 
-    fun openStreams(item: CatalogItem, episode: Episode?) {
-        val target = current ?: return
+    fun openStreams(item: CatalogItem, episode: Episode?, source: SourceEntry? = null) {
+        val target = source ?: current ?: return
         scope.launch {
             resolving = true
             activeItem = item
             activeEpisode = episode
+            activeSource = target
             selectedSource = 0
             streams = emptyList()
             runCatching {
@@ -427,18 +449,19 @@ fun App() {
      * Tapping a poster does what the original does: a series opens its result screen with the
      * season picker and the episode list, anything else goes straight to picking a source.
      */
-    fun openItem(item: CatalogItem) {
-        val target = current ?: return
+    fun openItem(item: CatalogItem, source: SourceEntry? = null) {
+        val target = source ?: current ?: return
         scope.launch {
             val groups = runCatching {
                 withContext(Dispatchers.IO) { target.catalog.episodeGroups(item) }
             }.getOrElse { emptyList() }
             if (groups.isEmpty()) {
-                openStreams(item, null)
+                openStreams(item, null, target)
             } else {
                 detailItem = item
                 detailGroups = groups
                 detailGroup = 0
+                detailSource = target
                 status = "${groups.sumOf { it.episodes.size }} episode(s) for ${item.title}"
             }
         }
@@ -448,8 +471,8 @@ fun App() {
      * The episode row's download button, which upstream's PieFetchButton turns into a queued
      * download: resolve the episode's links and queue the first one the source returns.
      */
-    fun downloadEpisode(item: CatalogItem, episode: Episode) {
-        val target = current ?: return
+    fun downloadEpisode(item: CatalogItem, episode: Episode, source: SourceEntry? = null) {
+        val target = source ?: current ?: return
         scope.launch {
             val links = runCatching {
                 withContext(Dispatchers.IO) { target.catalog.streams(item, episode) }
@@ -548,8 +571,20 @@ fun App() {
                             detailItem = null
                             screen = Screen.Search
                         },
-                        onPlay = { episode -> openStreams(detail, episode) },
-                        onDownload = { episode -> downloadEpisode(detail, episode) },
+                        onPlay = { episode -> openStreams(detail, episode, detailSource) },
+                        onDownload = { episode -> downloadEpisode(detail, episode, detailSource) },
+                        status = Library.status(detail.url),
+                        onSetStatus = { Library.setStatus(detail, detailSource?.name.orEmpty(), it) },
+                        favorite = Library.isFavorite(detail.url),
+                        onToggleFavorite = {
+                            val added = Library.toggleFavorite(detail, detailSource?.name.orEmpty())
+                            status = if (added) "${detail.title} added to favorites" else "${detail.title} removed from favorites"
+                        },
+                        subscribed = Library.isSubscribed(detail.url),
+                        onToggleSubscription = {
+                            val added = Library.toggleSubscription(detail, detailSource?.name.orEmpty())
+                            status = if (added) "Subscribed to ${detail.title}" else "Unsubscribed from ${detail.title}"
+                        },
                     )
                 } else when (screen) {
                     Screen.Home -> {
@@ -594,6 +629,22 @@ fun App() {
                         )
                     }
 
+                    Screen.Library -> LibraryScreen(
+                        entries = library,
+                        posterSize = settings.posterSize,
+                        titleUnder = settings.posterTitleUnder,
+                        randomButton = settings.randomButton,
+                        onOpen = { entry ->
+                            val source = sources.firstOrNull { it.name == entry.source }
+                            if (source == null) {
+                                status = "${entry.source.ifBlank { "Its provider" }} is not installed"
+                            } else {
+                                sourceIndex = sources.indexOf(source)
+                                openItem(entry.toCatalogItem(), source)
+                            }
+                        },
+                    )
+
                     Screen.Search -> SearchScreen(
                         query = query,
                         onQueryChange = { query = it },
@@ -607,6 +658,13 @@ fun App() {
                         posterSize = settings.posterSize,
                         titleUnder = settings.posterTitleUnder,
                         nsfwEnabled = settings.nsfwEnabled,
+                        history = searchHistory,
+                        onApplyHistory = { text ->
+                            query = text
+                            runSearch()
+                        },
+                        onRemoveHistory = { SearchHistory.remove(it) },
+                        onClearHistory = { SearchHistory.clear() },
                     )
 
                     Screen.Downloads -> DownloadsScreen(
@@ -646,8 +704,6 @@ fun App() {
                             settings = settings,
                             onBack = { settingsPage = SettingsPage.Root },
                             onStatus = { status = it },
-                            onRefreshExtensions = ::reloadExtensions,
-                            onUpdatePlugins = ::updateInstalledPlugins,
                         )
 
                         SettingsPage.Extensions -> ExtensionsScreen(
@@ -717,6 +773,12 @@ fun App() {
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onBackground,
                                     modifier = Modifier.weight(1f),
+                                )
+                                // Movies skip the result screen, so the same bookmark control
+                                // lives on the source picker they land on.
+                                WatchStatusButton(
+                                    status = Library.status(item.url),
+                                    onSetStatus = { Library.setStatus(item, activeSource?.name.orEmpty(), it) },
                                 )
                                 IconButton(
                                     onClick = {
@@ -967,17 +1029,39 @@ private fun DetailScreen(
     onSearch: () -> Unit,
     onPlay: (Episode) -> Unit,
     onDownload: (Episode) -> Unit,
+    status: Int,
+    onSetStatus: (Int) -> Unit,
+    favorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    subscribed: Boolean,
+    onToggleSubscription: () -> Unit,
 ) {
     val group = groups.getOrNull(groupIndex) ?: groups.firstOrNull()
     var seasonMenu by remember { mutableStateOf(false) }
 
     Column(modifier.fillMaxSize()) {
-        // result_back on the left, result_openinbrower + result_search on the right.
+        // result_back on the left; the result screen's bookmark, favorite and subscribe
+        // controls plus result_openinbrower + result_search on the right.
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             IconButton(onClick = onBack) {
                 Icon(Icons.Outlined.ArrowBack, contentDescription = "Back")
             }
             Spacer(Modifier.weight(1f))
+            WatchStatusButton(status = status, onSetStatus = onSetStatus)
+            IconButton(onClick = onToggleFavorite) {
+                Icon(
+                    if (favorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = "Add to favorites",
+                    tint = if (favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onToggleSubscription) {
+                Icon(
+                    if (subscribed) Icons.Outlined.Notifications else Icons.Outlined.NotificationsNone,
+                    contentDescription = "New episode notification",
+                    tint = if (subscribed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             IconButton(onClick = { runCatching { Desktop.getDesktop().browse(URI(item.url)) } }) {
                 Icon(Icons.Outlined.OpenInNew, contentDescription = "Open in browser")
             }
@@ -1244,6 +1328,10 @@ private fun SearchScreen(
     posterSize: Int,
     titleUnder: Boolean,
     nsfwEnabled: Boolean,
+    history: List<SearchHistoryEntry>,
+    onApplyHistory: (String) -> Unit,
+    onRemoveHistory: (String) -> Unit,
+    onClearHistory: () -> Unit,
 ) {
     var selectedTypes by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -1331,6 +1419,14 @@ private fun SearchScreen(
     }
 
     when {
+        // An empty field shows the history list, exactly like SearchFragment does.
+        query.isBlank() && history.isNotEmpty() -> SearchHistoryList(
+            history = history,
+            onApply = onApplyHistory,
+            onRemove = onRemoveHistory,
+            onClear = onClearHistory,
+        )
+
         searching -> Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(Modifier.height(18.dp).width(18.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(12.dp))
@@ -1370,6 +1466,54 @@ private fun SearchScreen(
             titleUnder = titleUnder,
             onOpen = onOpen,
         )
+    }
+}
+
+/** search_history_recycler: a recent search per row with its remove button, plus the footer. */
+@Composable
+private fun SearchHistoryList(
+    history: List<SearchHistoryEntry>,
+    onApply: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    LazyColumn(Modifier.fillMaxWidth()) {
+        items(history, key = { it.searchText }) { entry ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onApply(entry.searchText) }
+                    .padding(horizontal = 6.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.History,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    entry.searchText,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = { onRemove(entry.searchText) }) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "Remove",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+        item(key = "clear-history") {
+            TextButton(onClick = onClear) { Text("Clear history") }
+        }
     }
 }
 
@@ -1432,7 +1576,7 @@ private fun RowScope.PosterCard(
  * overlaid when *Poster title location* is off); *Poster size* controls how many fit a row.
  */
 @Composable
-private fun ItemList(
+internal fun ItemList(
     items: List<CatalogItem>,
     posterSize: Int,
     titleUnder: Boolean,
