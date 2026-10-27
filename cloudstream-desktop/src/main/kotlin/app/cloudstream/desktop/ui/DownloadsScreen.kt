@@ -62,7 +62,11 @@ internal fun formatBytes(bytes: Long): String = when {
  * and a Network stream button that plays any URL directly.
  */
 @Composable
-fun DownloadsScreen(settings: Settings, onStatus: (String) -> Unit) {
+fun DownloadsScreen(
+    settings: Settings,
+    onStatus: (String) -> Unit,
+    onPlayFile: (String, String) -> Unit,
+) {
     val tasks by DownloadManager.tasks.collectAsState()
     var usage by remember { mutableStateOf<DownloadManager.Usage?>(null) }
     var showNetworkStream by remember { mutableStateOf(false) }
@@ -112,9 +116,17 @@ fun DownloadsScreen(settings: Settings, onStatus: (String) -> Unit) {
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
             ) {
                 items(tasks, key = { it.id }) { task ->
-                    DownloadRow(task = task, onPlay = {
-                        onStatus(Player.open(StreamLink(task.title, task.url), settings.playerCommand))
-                    })
+                    DownloadRow(
+                        task = task,
+                        onPlay = {
+                            onPlayFile(task.title, Paths.get(settings.downloadsDir, task.fileName).toString())
+                        },
+                        onDelete = {
+                            DownloadManager.remove(task.id, Paths.get(settings.downloadsDir))
+                            onStatus("Removed ${task.title}")
+                        },
+                        onStatus = onStatus,
+                    )
                 }
             }
         }
@@ -159,9 +171,7 @@ fun DownloadsScreen(settings: Settings, onStatus: (String) -> Unit) {
                 TextButton(
                     onClick = {
                         val target = url.trim()
-                        if (target.isNotBlank()) {
-                            onStatus(Player.open(StreamLink("Network stream", target), settings.playerCommand))
-                        }
+                        if (target.isNotBlank()) onPlayFile("Network stream", target)
                         showNetworkStream = false
                     },
                 ) { Text("Play") }
@@ -179,7 +189,12 @@ private fun LegendDot(color: androidx.compose.ui.graphics.Color) {
 }
 
 @Composable
-private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
+private fun DownloadRow(
+    task: DownloadTask,
+    onPlay: () -> Unit,
+    onDelete: () -> Unit,
+    onStatus: (String) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -195,7 +210,12 @@ private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
                     DownloadState.RUNNING ->
                         "${task.fileName} · ${formatBytes(task.doneBytes)}" +
                             (if (task.totalBytes > 0) " / ${formatBytes(task.totalBytes)}" else "")
-                    DownloadState.DONE -> "${task.fileName} · ${formatBytes(task.totalBytes)}"
+                    DownloadState.DONE -> "${task.fileName} · ${formatBytes(task.totalBytes)}" +
+                        when (task.subtitles.size) {
+                            0 -> ""
+                            1 -> " · 1 subtitle"
+                            else -> " · ${task.subtitles.size} subtitles"
+                        }
                     DownloadState.FAILED -> task.error ?: "Download failed"
                 }
                 Text(
@@ -208,9 +228,18 @@ private fun DownloadRow(task: DownloadTask, onPlay: () -> Unit) {
                     fontSize = 11.sp,
                 )
             }
+            if (task.state == DownloadState.RUNNING || task.state == DownloadState.QUEUED) {
+                TextButton(
+                    onClick = {
+                        DownloadManager.cancel(task.id)
+                        onStatus("Cancelled ${task.title}")
+                    },
+                ) { Text("Cancel") }
+            }
             if (task.state == DownloadState.DONE) {
                 TextButton(onClick = onPlay) { Text("Play") }
             }
+            TextButton(onClick = onDelete) { Text("Delete") }
         }
         if (task.state == DownloadState.RUNNING) {
             Spacer(Modifier.height(6.dp))

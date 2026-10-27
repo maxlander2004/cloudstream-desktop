@@ -46,6 +46,17 @@ fun main(args: Array<String>) = runBlocking {
                 ))
                 if (browse.isFailure) failures++
 
+                // The home screen draws these rows as the original's horizontal rails.
+                val rows = runCatching { catalog.browseSections() }
+                println("    rows      : " + rows.fold(
+                    { sections ->
+                        if (sections.isEmpty()) "none (flat list)"
+                        else sections.joinToString(", ") { "${it.name}(${it.items.size})" }
+                    },
+                    { "FAILED — ${it.message}" },
+                ))
+                if (rows.isFailure) failures++
+
                 val search = runCatching { catalog.search("test") }
                 println("    search    : " + search.fold(
                     { "${it.size} results" },

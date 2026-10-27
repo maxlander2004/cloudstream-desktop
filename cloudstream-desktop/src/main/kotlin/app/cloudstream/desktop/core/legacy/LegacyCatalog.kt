@@ -2,8 +2,11 @@ package app.cloudstream.desktop.core.legacy
 
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.CatalogItem
+import app.cloudstream.desktop.api.ItemType
 import app.cloudstream.desktop.api.StreamLink
+import app.cloudstream.desktop.api.SubtitleTrack
 import com.lagradost.cloudstream3.AnimeLoadResponse
+import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.LiveStreamLoadResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -12,6 +15,7 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
+import com.lagradost.cloudstream3.TvType
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -39,7 +43,19 @@ class LegacyCatalog(
     /** `load()` is the expensive step; the stream dialog may be reopened for the same item. */
     private val loaded = ConcurrentHashMap<String, LoadResponse>()
 
-    override suspend fun browse(): List<CatalogItem> {
+    /** Loads the upstream [LoadResponse] for [url] and wraps it for the result screen. */
+    suspend fun loadResult(url: String): ResultItem? = runCatching {
+        val response = loaded[url] ?: provider.load(url)
+            .also { if (it != null) loaded[url] = it }
+        if (response == null) return@runCatching null
+        ResultItem(response, pluginName)
+    }.getOrNull()
+
+    /**
+     * Upstream's home rows, keeping the row names the original draws as rail headers. Each entry
+     * is one `HomePageResponse.items` element.
+     */
+    suspend fun browseSections(): List<CatalogSection> {
         val page = provider.mainPage.firstOrNull()
         val response = try {
             provider.getMainPage(
@@ -54,8 +70,23 @@ class LegacyCatalog(
             return emptyList()
         }
 
-        return response?.items.orEmpty().flatMap { it.list }.map { it.toCatalogItem() }
+        return response?.items.orEmpty().map { row ->
+            CatalogSection(
+                name = row.name,
+                items = row.list.orEmpty().map { item ->
+                    CatalogItem(
+                        title = item.name.ifBlank { item.url },
+                        url = item.url,
+                        subtitle = item.apiName.ifBlank { null },
+                        posterUrl = item.posterUrl,
+                        type = itemTypeFor(item.type),
+                    )
+                },
+            )
+        }
     }
+
+    override suspend fun browse(): List<CatalogItem> = browseSections().flatMap { it.items }
 
     override suspend fun search(query: String): List<CatalogItem> {
         if (query.isBlank()) return emptyList()
@@ -70,13 +101,21 @@ class LegacyCatalog(
             null
         }
 
-        return results.orEmpty().map { it.toCatalogItem() }
+        return results.orEmpty().map { item ->
+            CatalogItem(
+                title = item.name.ifBlank { item.url },
+                url = item.url,
+                subtitle = item.apiName.ifBlank { null },
+                posterUrl = item.posterUrl,
+                type = itemTypeFor(item.type),
+            )
+        }
     }
 
     override suspend fun streams(item: CatalogItem): List<StreamLink> {
         val response = loaded[item.url] ?: runCatching { provider.load(item.url) }
             .getOrNull()
-            ?.also { loaded[item.url] = it }
+            ?.also { if (it != null) loaded[item.url] = it }
             ?: return emptyList()
 
         val episode: Episode? = when (response) {
@@ -84,7 +123,7 @@ class LegacyCatalog(
             is LiveStreamLoadResponse -> null
             is TvSeriesLoadResponse -> response.episodes.firstOrNull()
             is AnimeLoadResponse -> response.episodes.values.firstNotNullOfOrNull { it.firstOrNull() }
-            else -> return emptyList()
+            else -> null
         }
 
         val data: String? = when {
@@ -93,10 +132,31 @@ class LegacyCatalog(
             else -> episode?.data
         }
 
+        return streamsFor(data, episode?.name)
+    }
+
+    /**
+     * Resolves playable links for an upstream episode's `data` string — the same `loadLinks`
+     * call the Android player makes. The result screen resolves one episode at a time with
+     * this, so every season/episode in the picker is playable. Upstream reports subtitles
+     * through a callback rather than on the link, so they are collected and attached to every
+     * link of the episode.
+     */
+    suspend fun streamsFor(data: String?, episodeName: String? = null): List<StreamLink> {
         if (data.isNullOrBlank()) return emptyList()
 
+        val subtitles = mutableListOf<SubtitleTrack>()
         val links = mutableListOf<StreamLink>()
-        provider.loadLinks(data, false, { }) { link ->
+        provider.loadLinks(data, false, { file ->
+            val label = file.lang.takeIf { it.isNotBlank() } ?: return@loadLinks
+            if (file.url.isBlank()) return@loadLinks
+            subtitles += SubtitleTrack(
+                label = label,
+                language = file.langTag ?: file.lang,
+                url = file.url,
+                headers = file.headers.orEmpty(),
+            )
+        }) { link ->
             val headers = if (link.headers.containsKey("Referer") || link.referer.isBlank()) {
                 link.headers
             } else {
@@ -108,30 +168,42 @@ class LegacyCatalog(
                 ?: "Stream"
 
             links += StreamLink(
-                title = episode?.name?.takeIf { it.isNotBlank() }?.let { "$it · $label" } ?: label,
+                title = episodeName?.takeIf { it.isNotBlank() }?.let { "$it · $label" } ?: label,
                 url = link.url,
                 headers = headers,
             )
         }
 
-        return links
+        // The subtitle callback may arrive after the links, so attach them at the end.
+        return links.map { link -> link.copy(subtitles = subtitles.toList()) }
     }
 
-    private fun SearchResponse.toCatalogItem() = CatalogItem(
-        title = name.ifBlank { url },
-        url = url,
-        subtitle = apiName.ifBlank { null },
-        posterUrl = posterUrl,
-        type = type.toItemType(),
-    )
+    /**
+     * Returns the episode map the result screen uses for episode-based items. Each key is a
+     * [DubStatus], each value is a season → episodes map. Mirrors how `ResultViewModel2` builds
+     * the season/episode UI in the Android app.
+     */
+    suspend fun episodeMapFor(url: String): Map<DubStatus, Map<Int, List<DesktopEpisode>>>? = runCatching {
+        val response = loadResult(url)?.response
+        if (response == null) return@runCatching null
+        ResultItem.episodeMapFor(response)
+    }.getOrNull()
 
-    /** Upstream's `TvType` reduced to the desktop categories the Providers settings filter on. */
-    private fun com.lagradost.cloudstream3.TvType?.toItemType() = when (this?.name?.lowercase()) {
-        "movie" -> app.cloudstream.desktop.api.ItemType.MOVIE
-        "tvseries", "tvshow" -> app.cloudstream.desktop.api.ItemType.SERIES
-        "anime", "ova", "animeothers" -> app.cloudstream.desktop.api.ItemType.ANIME
-        "live", "livestream" -> app.cloudstream.desktop.api.ItemType.LIVE
-        "nsfw" -> app.cloudstream.desktop.api.ItemType.NSFW
-        else -> app.cloudstream.desktop.api.ItemType.OTHER
+    private fun itemTypeFor(type: TvType?): ItemType {
+        if (type == null) return ItemType.OTHER
+        return when (type.name.lowercase()) {
+            "movie" -> ItemType.MOVIE
+            "tvseries", "tvshow" -> ItemType.SERIES
+            "anime", "ova", "animeothers" -> ItemType.ANIME
+            "live", "livestream" -> ItemType.LIVE
+            "nsfw" -> ItemType.NSFW
+            else -> ItemType.OTHER
+        }
     }
 }
+
+/** One home row from a provider, mirroring upstream's `HomePageList`. */
+data class CatalogSection(
+    val name: String,
+    val items: List<CatalogItem>,
+)

@@ -51,4 +51,21 @@ data class StreamLink(
     val url: String,
     /** Request headers the source needs, e.g. `Referer`; passed on when the player accepts them. */
     val headers: Map<String, String> = emptyMap(),
+    /** Subtitle tracks the source offers for this link; the player turns them on on demand. */
+    val subtitles: List<SubtitleTrack> = emptyList(),
+)
+
+/**
+ * One subtitle a source offers, the desktop counterpart of upstream's `SubtitleFile`.
+ *
+ * Extensions report `lang` as either a code (`"en"`) or a language name (`"English"`); both
+ * are kept as-is so the player menu reads the way the source labels it.
+ */
+data class SubtitleTrack(
+    val label: String,
+    /** Language code the source reported, e.g. `en`; null when it only gave a label. */
+    val language: String? = null,
+    val url: String,
+    /** Request headers the subtitle file needs, usually the same `Referer` as the video. */
+    val headers: Map<String, String> = emptyMap(),
 )

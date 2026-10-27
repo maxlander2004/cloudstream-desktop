@@ -2,7 +2,6 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
     kotlin("jvm") version "2.4.0"
-    kotlin("multiplatform") version "2.4.0" apply false
     kotlin("plugin.serialization") version "2.4.0"
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.0"
     id("org.jetbrains.compose") version "1.12.0"
@@ -25,17 +24,28 @@ dependencies {
     // Translates an extension's classes.dex into JVM bytecode.
     implementation("de.femtopedia.dex2jar:dex-translator:2.4.38")
 
+    // Kotlin Compose 1.12 requires the Compose Base plugin to be applied to the root project
+    // and activated for the JVM target; this activation isn't automatic in 1.12, so add it here.
+    implementation(compose.desktop.currentOs)
+
     // Needed at compile time to install a Downloader for the YouTube extractor. okhttp is
     // already what CloudStream's own HTTP stack uses; this pins the same version.
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.3")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation(compose.desktop.currentOs)
-    implementation(compose.material3)
+    implementation("org.jetbrains.compose.material3:material3:1.7.3")
     // Rail and settings icons matching the original app's UI.
-    implementation(compose.materialIconsExtended)
+    implementation("org.jetbrains.compose.material:material-icons-extended:1.7.3")
     // Poster artwork on the home/search grids, like the Android app's poster cards.
     implementation("io.coil-kt.coil3:coil-compose:3.2.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
+
+    // In-app playback: VLCJ embeds the local VLC/libvlc install in the app window. Users
+    // without VLC keep the external-player fallback, so this is optional at runtime.
+    implementation("uk.co.caprica:vlcj:4.12.1")
+
+    // Compose Desktop JVM target activation.
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")

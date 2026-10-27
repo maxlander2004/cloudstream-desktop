@@ -3,6 +3,8 @@ package app.cloudstream.desktop.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,25 +15,32 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
@@ -41,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,9 +59,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
@@ -65,11 +80,19 @@ import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.ExtensionLoadResult
 import app.cloudstream.desktop.core.ExtensionRepository
 import app.cloudstream.desktop.core.IptvSource
+import app.cloudstream.desktop.core.Library
+import app.cloudstream.desktop.core.PlaybackSession
 import app.cloudstream.desktop.core.Player
+import app.cloudstream.desktop.core.SessionEpisode
 import app.cloudstream.desktop.core.RepositoryPlugin
 import app.cloudstream.desktop.core.RepositorySet
 import app.cloudstream.desktop.core.Settings
 import app.cloudstream.desktop.core.UpdateCheck
+import app.cloudstream.desktop.core.WatchRecord
+import app.cloudstream.desktop.core.watchLabel
+import app.cloudstream.desktop.core.legacy.CatalogSection
+import app.cloudstream.desktop.core.legacy.LegacyCatalog
+import app.cloudstream.desktop.core.legacy.ResultItem
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -86,6 +109,7 @@ import java.nio.file.Paths
 private enum class Screen(val label: String, val icon: ImageVector) {
     Home("Home", Icons.Outlined.Home),
     Search("Search", Icons.Outlined.Search),
+    Library("Library", Icons.Outlined.VideoLibrary),
     Downloads("Downloads", Icons.Outlined.Download),
     Settings("Settings", Icons.Outlined.Settings),
 }
@@ -107,9 +131,13 @@ fun App() {
     var screen by remember { mutableStateOf(Screen.Home) }
     var settingsPage by remember { mutableStateOf(SettingsPage.Root) }
     var darkTheme by remember { mutableStateOf(settings.appTheme != "light") }
-    var sourceIndex by remember { mutableStateOf(0) }
+    // Upstream opens on the provider that was set as the homepage.
+    var sourceIndex by remember { mutableStateOf(settings.homepageProviderIndex.coerceAtLeast(0)) }
     var items by remember { mutableStateOf<List<CatalogItem>>(emptyList()) }
+    // A provider's named home rows, when it has them — drawn as the original's poster rails.
+    var sections by remember { mutableStateOf<List<CatalogSection>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
+    var accent by remember { mutableStateOf(accentColor(settings.accentColor)) }
     var failure by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Loading…") }
 
@@ -125,8 +153,16 @@ fun App() {
     var fetchedFrom by remember { mutableStateOf<List<String>?>(null) }
 
     var activeItem by remember { mutableStateOf<CatalogItem?>(null) }
+    var resultItem by remember { mutableStateOf<ResultItem?>(null) }
+    var loadingResult by remember { mutableStateOf(false) }
+    var resultError by remember { mutableStateOf<String?>(null) }
     var streams by remember { mutableStateOf<List<StreamLink>>(emptyList()) }
     var resolving by remember { mutableStateOf(false) }
+    var showResultScreen by remember { mutableStateOf(false) }
+    /** Episode `data` to preselect when the detail screen opens (Continue watching). */
+    var resumeEpisode by remember { mutableStateOf<String?>(null) }
+    /** Non-null while the in-app player is open. */
+    var playerSession by remember { mutableStateOf<PlaybackSession?>(null) }
 
     var updateBanner by remember { mutableStateOf<UpdateCheck?>(null) }
 
@@ -150,6 +186,10 @@ fun App() {
         }
     }
     val current = sources.getOrNull(sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)))
+
+    // Bookmarks and watch history; every Library change bumps the version and re-reads them.
+    val libraryVersion by Library.changes.collectAsState()
+    val continueWatching = remember(libraryVersion) { Library.history() }
 
     fun visibleItems(list: List<CatalogItem>): List<CatalogItem> {
         val media = settings.preferredMedia.toSet()
@@ -299,26 +339,52 @@ fun App() {
             loading = true
             failure = null
             items = emptyList()
-            runCatching { withContext(Dispatchers.IO) { target.catalog.browse() } }
-                .onSuccess {
-                    items = visibleItems(it)
-                    status = "${items.size} items from ${target.name}"
+            sections = emptyList()
+
+            // Providers expose named home rows; upstream draws each one as a horizontal rail.
+            val loaded = runCatching {
+                withContext(Dispatchers.IO) {
+                    (target.catalog as? LegacyCatalog)?.browseSections()
                 }
-                .onFailure {
-                    failure = it.message ?: "Could not load ${target.name}"
-                    status = "Failed to load ${target.name}"
-                }
+            }.getOrElse {
+                failure = it.message ?: "Could not load ${target.name}"
+                status = "Failed to load ${target.name}"
+                loading = false
+                return@launch
+            }
+
+            if (loaded != null) {
+                val rows = loaded
+                    .map { row -> CatalogSection(row.name, visibleItems(row.items)) }
+                    .filter { it.items.isNotEmpty() }
+                items = rows.flatMap { it.items }
+                // Named rows become rails; a provider with one unnamed row keeps the poster grid.
+                sections = rows.takeIf { rows.isNotEmpty() && rows.all { it.name.isNotBlank() } }.orEmpty()
+                status = "${items.size} items from ${target.name}"
+            } else {
+                runCatching { withContext(Dispatchers.IO) { target.catalog.browse() } }
+                    .onSuccess {
+                        items = visibleItems(it)
+                        status = "${items.size} items from ${target.name}"
+                    }
+                    .onFailure {
+                        failure = it.message ?: "Could not load ${target.name}"
+                        status = "Failed to load ${target.name}"
+                    }
+            }
             loading = false
         }
     }
 
     fun runSearch() {
         if (query.isBlank()) return
+        Library.addSearch(query)
         val targets = if (settings.advancedSearch) sources else listOfNotNull(current)
         scope.launch {
             searching = true
             failure = null
             items = emptyList()
+            sections = emptyList()
             searchGroups = emptyList()
 
             if (settings.advancedSearch && targets.size > 1) {
@@ -371,6 +437,63 @@ fun App() {
         }
     }
 
+    /**
+     * Opens the result/detail screen for an item when the current source is an upstream
+     * extension (LegacyCatalog). Falls back to the simple stream dialog for native catalogs
+     * like the built-in IPTV source.
+     */
+    fun openItem(item: CatalogItem, resumeEpisodeData: String? = null) {
+        resumeEpisode = resumeEpisodeData
+        val target = current ?: return
+        val legacy = target.catalog as? LegacyCatalog
+        if (legacy != null) {
+            showResultScreen = true
+            resultItem = null
+            loadingResult = true
+            resultError = null
+            scope.launch {
+                val loaded = withContext(Dispatchers.IO) {
+                    runCatching { legacy.loadResult(item.url) }.getOrNull()
+                }
+                loadingResult = false
+                if (loaded != null) {
+                    resultItem = loaded
+                } else {
+                    resultError = "Could not load details for ${item.title}"
+                    status = resultError ?: "Could not load details"
+                    showResultScreen = false
+                }
+            }
+        } else {
+            // Native catalog: reuse the existing simple stream dialog.
+            openStreams(item)
+        }
+    }
+
+    /** Continue watching: reopen the item on the episode the history entry points at. */
+    fun resumeItem(record: WatchRecord) {
+        openItem(
+            CatalogItem(
+                title = record.title,
+                url = record.itemUrl,
+                subtitle = record.episodeLabel.takeIf { it.isNotBlank() },
+                posterUrl = record.posterUrl,
+                type = ItemType.entries.firstOrNull { it.name == record.type } ?: ItemType.OTHER,
+            ),
+            record.episodeData,
+        )
+    }
+
+    /** In-app playback when the embedded engine is available, otherwise the external player. */
+    fun startPlayback(session: PlaybackSession?, stream: StreamLink) {
+        if (session != null && settings.inAppPlayer && VideoEngine.available) {
+            playerSession = session
+            status = "Playing ${session.title} in the app"
+        } else {
+            status = Player.open(stream, settings.playerCommand)
+        }
+    }
+
     LaunchedEffect(Unit) {
         extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
         status = "${extensions.loaded.size} extension(s) loaded"
@@ -398,16 +521,12 @@ fun App() {
         }
     }
 
-    CloudStreamTheme(dark = darkTheme) {
+    CloudStreamTheme(dark = darkTheme, accent = accent) {
+        // The detail screen takes over the whole window, like the original's result page.
+        Box(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "CS",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp,
-                )
+            // Upstream's rail: icon-only items on primaryGrayBackground, accent when selected.
+            NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
                 Spacer(Modifier.height(16.dp))
                 Screen.entries.forEach { entry ->
                     NavigationRailItem(
@@ -417,19 +536,16 @@ fun App() {
                             if (entry == Screen.Home) loadBrowse()
                         },
                         icon = {
-                            androidx.compose.material3.Icon(
+                            Icon(
                                 entry.icon,
                                 contentDescription = entry.label,
-                                modifier = Modifier.height(20.dp),
+                                modifier = Modifier.size(24.dp),
                             )
                         },
-                        label = { Text(entry.label, fontSize = 11.sp) },
                         colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.White,
-                            selectedTextColor = MaterialTheme.colorScheme.onBackground,
-                            indicatorColor = MaterialTheme.colorScheme.primary,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                            unselectedIconColor = MaterialTheme.colorScheme.onBackground,
                         ),
                     )
                 }
@@ -464,18 +580,36 @@ fun App() {
 
                         HomeScreen(
                             sources = sources,
-                            sourceIndex = sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)),
-                            onSelectSource = {
-                                sourceIndex = it
+                            currentSourceIndex = sourceIndex,
+                            onSelectSource = { index ->
+                                sourceIndex = index
                                 loadBrowse()
                             },
+                            onSelectHomepage = { index ->
+                                settings.homepageProviderIndex = index
+                                sourceIndex = index
+                                loadBrowse() },
                             items = items,
+                            sections = sections,
+                            continueWatching = continueWatching,
+                            onResume = ::resumeItem,
                             loading = loading,
                             failure = failure,
                             onRetry = ::loadBrowse,
-                            onOpen = ::openStreams,
+                            onOpen = { openItem(it) },
                             posterSize = settings.posterSize,
                             titleUnder = settings.posterTitleUnder,
+                            preferredMedia = settings.preferredMedia,
+                            onToggleMedia = { media ->
+                                val selected = settings.preferredMedia
+                                // Empty means "show every type", the same rule the filter uses.
+                                settings.preferredMedia = when {
+                                    selected.isEmpty() -> MediaTypeChips.map { it.first } - media
+                                    media in selected -> selected - media
+                                    else -> selected + media
+                                }
+                                loadBrowse()
+                            },
                         )
                     }
 
@@ -488,14 +622,55 @@ fun App() {
                         searchGroups = searchGroups,
                         advanced = settings.advancedSearch,
                         failure = failure,
-                        onOpen = ::openStreams,
+                        searches = Library.searches(),
+                        onRemoveSearch = { Library.removeSearch(it) },
+                        onClearSearches = { Library.clearSearches() },
+                        preferredMedia = settings.preferredMedia,
+                        onToggleMedia = { media ->
+                            val selected = settings.preferredMedia
+                            settings.preferredMedia = when {
+                                selected.isEmpty() -> MediaTypeChips.map { it.first } - media
+                                media in selected -> selected - media
+                                else -> selected + media
+                            }
+                            if (query.isNotBlank()) runSearch()
+                        },
+                        onOpen = { openItem(it) },
                         posterSize = settings.posterSize,
                         titleUnder = settings.posterTitleUnder,
+                    )
+
+                    Screen.Library -> LibraryScreen(
+                        settings = settings,
+                        onOpen = { openItem(it) },
+                        onResume = ::resumeItem,
+                        onStatus = { status = it },
                     )
 
                     Screen.Downloads -> DownloadsScreen(
                         settings = settings,
                         onStatus = { status = it },
+                        onPlayFile = { title, location ->
+                            val link = StreamLink(title, location)
+                            startPlayback(
+                                PlaybackSession(
+                                    itemUrl = location,
+                                    title = title,
+                                    apiName = "Download",
+                                    episodes = listOf(
+                                        SessionEpisode(
+                                            label = title,
+                                            data = location,
+                                            season = null,
+                                            episode = null,
+                                            streams = listOf(link),
+                                        ),
+                                    ),
+                                    directDataUrl = location,
+                                ),
+                                link,
+                            )
+                        },
                     )
 
                     Screen.Settings -> when (settingsPage) {
@@ -524,6 +699,18 @@ fun App() {
                             dark = darkTheme,
                             onThemeChange = { darkTheme = it },
                             onBack = { settingsPage = SettingsPage.Root },
+                        )
+
+                        SettingsPage.Ui -> UiSettings(
+                            settings = settings,
+                            dark = darkTheme,
+                            onThemeChange = { darkTheme = it },
+                            onAccentChange = { hex ->
+                                settings.accentColor = hex
+                                accent = accentColor(hex)
+                            },
+                            onBack = { settingsPage = SettingsPage.Root },
+                            onStatus = { status = it },
                         )
 
                         SettingsPage.UpdatesBackup -> UpdatesBackupSettings(
@@ -574,7 +761,7 @@ fun App() {
                             Text("Resolving streams…")
                         }
                     } else {
-                        LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                        LazyColumn(Modifier.height(320.dp)) {
                             items(streams) { stream ->
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     TextButton(
@@ -608,21 +795,71 @@ fun App() {
                 },
             )
         }
+
+        if (showResultScreen && resultItem != null && !loadingResult) {
+            ResultScreen(
+                item = resultItem!!,
+                catalog = current?.catalog ?: return@CloudStreamTheme,
+                posterSize = settings.posterSize,
+                titleUnder = settings.posterTitleUnder,
+                settings = settings,
+                resumeEpisodeData = resumeEpisode,
+                onDismiss = { showResultScreen = false },
+                onOpenRecommendation = { related -> openItem(related) },
+                onSearchTag = { tag ->
+                    query = tag
+                    showResultScreen = false
+                    screen = Screen.Search
+                    runSearch()
+                },
+                onStatus = { status = it },
+                onPlay = { stream, session -> startPlayback(session, stream) },
+                onDownload = { stream ->
+                    DownloadManager.add(
+                        settings = settings,
+                        title = "${resultItem!!.title} · ${stream.title}",
+                        url = stream.url,
+                        headers = stream.headers,
+                        subtitles = stream.subtitles,
+                    )
+                    status = "Queued ${resultItem!!.title}"
+                    showResultScreen = false
+                    screen = Screen.Downloads
+                },
+            )
+        }
+
+        // The player covers the whole window, like the original's player activity.
+        playerSession?.let { session ->
+            PlayerScreen(
+                session = session,
+                settings = settings,
+                onClose = { playerSession = null },
+                onStatus = { status = it },
+            )
+        }
+        }
     }
 }
 
 @Composable
 private fun HomeScreen(
     sources: List<SourceEntry>,
-    sourceIndex: Int,
+    currentSourceIndex: Int,
     onSelectSource: (Int) -> Unit,
+    onSelectHomepage: (Int) -> Unit,
     items: List<CatalogItem>,
+    sections: List<CatalogSection>,
+    continueWatching: List<WatchRecord>,
+    onResume: (WatchRecord) -> Unit,
     loading: Boolean,
     failure: String?,
     onRetry: () -> Unit,
     onOpen: (CatalogItem) -> Unit,
     posterSize: Int,
     titleUnder: Boolean,
+    preferredMedia: List<String>,
+    onToggleMedia: (String) -> Unit,
 ) {
     Text("CloudStream", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
     Text(
@@ -630,27 +867,74 @@ private fun HomeScreen(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
     )
-    Spacer(Modifier.height(14.dp))
+    Spacer(Modifier.height(10.dp))
 
+    // Provider chips — the original's "Home source" picker, laid out as a desktop row.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            sources.forEachIndexed { index, source ->
+                FilterChip(
+                    selected = index == currentSourceIndex,
+                    onClick = { onSelectSource(index) },
+                    label = { Text(source.name) },
+                )
+            }
+        }
+        TextButton(onClick = { onSelectHomepage(currentSourceIndex) }) {
+            Text("Set as homepage", fontSize = 12.sp)
+        }
+    }
+
+    Spacer(Modifier.height(8.dp))
+
+    // Upstream's media-type chips: Movies, TV Series, Anime, Livestreams, NSFW.
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        sources.forEachIndexed { index, source ->
+        MediaTypeChips.forEach { (media, label) ->
             FilterChip(
-                selected = index == sourceIndex,
-                onClick = { onSelectSource(index) },
-                label = { Text(source.name) },
+                selected = preferredMedia.isEmpty() || media in preferredMedia,
+                onClick = { onToggleMedia(media) },
+                label = { Text(label, fontSize = 11.sp) },
             )
         }
     }
+    Spacer(Modifier.height(10.dp))
 
-    Spacer(Modifier.height(14.dp))
-
-    val description = sources.getOrNull(sourceIndex)?.description.orEmpty()
+    val description = sources.getOrNull(currentSourceIndex)?.description.orEmpty()
     if (description.isNotEmpty()) {
         Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         Spacer(Modifier.height(10.dp))
+    }
+
+    // Upstream's Continue watching rail, built from the local watch history.
+    if (continueWatching.isNotEmpty()) {
+        RailHeader("Continue watching")
+        Spacer(Modifier.height(6.dp))
+        PosterRailRow(
+            items = continueWatching.map { record ->
+                CatalogItem(
+                    title = record.title,
+                    url = record.itemUrl,
+                    subtitle = watchLabel(record).takeIf { it.isNotBlank() },
+                    posterUrl = record.posterUrl,
+                    type = ItemType.entries.firstOrNull { it.name == record.type } ?: ItemType.OTHER,
+                )
+            },
+            titleUnder = false,
+            onOpen = { selected ->
+                continueWatching.firstOrNull { it.itemUrl == selected.url }?.let(onResume)
+                    ?: onOpen(selected)
+            },
+        )
+        Spacer(Modifier.height(12.dp))
     }
 
     when {
@@ -666,7 +950,13 @@ private fun HomeScreen(
             Button(onClick = onRetry) { Text("Retry") }
         }
 
-        else -> ItemList(
+        sections.isNotEmpty() -> PosterRails(
+            sections = sections,
+            titleUnder = titleUnder,
+            onOpen = onOpen,
+        )
+
+        else -> PosterGrid(
             items = items,
             posterSize = posterSize,
             titleUnder = titleUnder,
@@ -674,6 +964,8 @@ private fun HomeScreen(
         )
     }
 }
+
+
 
 @Composable
 private fun SearchScreen(
@@ -685,6 +977,11 @@ private fun SearchScreen(
     searchGroups: List<Pair<String, List<CatalogItem>>>,
     advanced: Boolean,
     failure: String?,
+    searches: List<String>,
+    onRemoveSearch: (String) -> Unit,
+    onClearSearches: () -> Unit,
+    preferredMedia: List<String>,
+    onToggleMedia: (String) -> Unit,
     onOpen: (CatalogItem) -> Unit,
     posterSize: Int,
     titleUnder: Boolean,
@@ -692,16 +989,77 @@ private fun SearchScreen(
     Text("Search", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
     Spacer(Modifier.height(14.dp))
 
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQueryChange,
-            label = { Text("Query") },
-            singleLine = true,
-            modifier = Modifier.width(420.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Button(onClick = onSubmit, enabled = !searching) { Text("Search") }
+    // Upstream's search bar: a rounded field with a leading icon; Enter runs the search.
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text("Search") },
+        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+        trailingIcon = {
+            if (query.isNotEmpty()) {
+                IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                }
+            }
+        },
+        singleLine = true,
+        shape = RoundedCornerShape(24.dp),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
+        modifier = Modifier.width(520.dp),
+    )
+
+    Spacer(Modifier.height(10.dp))
+
+    // Upstream's media-type chips also sit on the search screen.
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        MediaTypeChips.forEach { (media, label) ->
+            FilterChip(
+                selected = preferredMedia.isEmpty() || media in preferredMedia,
+                onClick = { onToggleMedia(media) },
+                label = { Text(label, fontSize = 11.sp) },
+            )
+        }
+    }
+
+    // Upstream shows the recent searches while the field is empty.
+    if (query.isBlank() && searches.isNotEmpty() && items.isEmpty() && searchGroups.isEmpty() && !searching) {
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "Recent searches",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontWeight = FontWeight.Medium,
+                fontSize = 14.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onClearSearches) { Text("Clear history", fontSize = 12.sp) }
+        }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            searches.forEach { entry ->
+                FilterChip(
+                    selected = false,
+                    onClick = {
+                        onQueryChange(entry)
+                        onSubmit()
+                    },
+                    label = { Text(entry, fontSize = 12.sp) },
+                    trailingIcon = {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Remove $entry",
+                            modifier = Modifier.size(16.dp).clickable { onRemoveSearch(entry) },
+                        )
+                    },
+                )
+            }
+        }
     }
 
     Spacer(Modifier.height(16.dp))
@@ -715,32 +1073,16 @@ private fun SearchScreen(
 
         failure != null -> Text(failure, color = MaterialTheme.colorScheme.error)
 
-        advanced && searchGroups.isNotEmpty() -> LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            searchGroups.forEach { (sourceName, group) ->
-                if (group.isNotEmpty()) {
-                    item(key = "header:$sourceName") {
-                        Text(
-                            sourceName,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 13.sp,
-                        )
-                    }
-                    item(key = "grid:$sourceName") {
-                        ItemList(
-                            items = group,
-                            posterSize = posterSize,
-                            titleUnder = titleUnder,
-                            onOpen = onOpen,
-                        )
-                    }
-                }
-            }
-        }
+        advanced && searchGroups.isNotEmpty() -> GroupedResults(
+            groups = searchGroups,
+            posterSize = posterSize,
+            titleUnder = titleUnder,
+            onOpen = onOpen,
+        )
 
         items.isEmpty() -> Text("No results yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-        else -> ItemList(
+        else -> PosterGrid(
             items = items,
             posterSize = posterSize,
             titleUnder = titleUnder,
@@ -749,74 +1091,9 @@ private fun SearchScreen(
     }
 }
 
-/**
- * The original app's poster grid: artwork in fixed cells with the title under the poster (or
- * overlaid when *Poster title location* is off); *Poster size* controls how many fit a row.
- */
-@Composable
-private fun ItemList(
-    items: List<CatalogItem>,
-    posterSize: Int,
-    titleUnder: Boolean,
-    onOpen: (CatalogItem) -> Unit,
-) {
-    val columns = (8 - posterSize).coerceIn(3, 8)
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        items(items, key = { it.url + it.title }) { item ->
-            Column(
-                Modifier.clickable { onOpen(item) },
-            ) {
-                Box(
-                    Modifier.fillMaxWidth()
-                        .aspectRatio(0.67f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surface),
-                ) {
-                    if (item.posterUrl != null) {
-                        AsyncImage(
-                            model = item.posterUrl,
-                            contentDescription = item.title,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                    if (!titleUnder) {
-                        Text(
-                            item.title,
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 2,
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .fillMaxWidth()
-                                .background(Color.Black.copy(alpha = 0.55f))
-                                .padding(6.dp),
-                        )
-                    }
-                }
-                if (titleUnder) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        item.title,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 2,
-                    )
-                    val subtitle = item.subtitle
-                    if (!subtitle.isNullOrBlank()) {
-                        Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1)
-                    }
-                }
-            }
-        }
-    }
-}
+
+
+
 
 /** Matches a repository entry to its installed extension, whatever the local file is called. */
 internal fun ExtensionLoadResult.installedVersion(plugin: RepositoryPlugin): Int? {

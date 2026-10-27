@@ -1,8 +1,11 @@
 package app.cloudstream.desktop.core
 
+import app.cloudstream.desktop.api.SubtitleTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -32,6 +35,8 @@ data class DownloadTask(
     val totalBytes: Long = -1,
     val doneBytes: Long = 0,
     val error: String? = null,
+    /** Subtitle files saved beside the finished download, e.g. `Movie.en.srt`. */
+    val subtitles: List<String> = emptyList(),
 ) {
     val progress: Float
         get() = if (totalBytes > 0) (doneBytes.toFloat() / totalBytes).coerceIn(0f, 1f) else 0f
@@ -60,6 +65,9 @@ object DownloadManager {
     private val _tasks = MutableStateFlow<List<DownloadTask>>(emptyList())
     val tasks: StateFlow<List<DownloadTask>> = _tasks
 
+    /** Running jobs, so a queued download can be cancelled. */
+    private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
     /** Permits for parallel downloads; replaced whenever a download is queued. */
     @Volatile
     private var semaphore = Semaphore(3)
@@ -80,10 +88,32 @@ object DownloadManager {
         mutate { list -> list.filterNot { it.state == DownloadState.DONE || it.state == DownloadState.FAILED } }
     }
 
+    /** Stops a running or queued download; the task stays in the list as failed/cancelled. */
+    fun cancel(id: String) {
+        jobs.remove(id)?.cancel()
+        patch(id) { it.copy(state = DownloadState.FAILED, error = "Cancelled") }
+    }
+
+    /** Removes a task, deleting the file of a finished download when [dir] is given. */
+    fun remove(id: String, dir: Path? = null) {
+        val task = _tasks.value.firstOrNull { it.id == id }
+        jobs.remove(id)?.cancel()
+        if (task != null && task.state == DownloadState.DONE && dir != null) {
+            runCatching { Files.deleteIfExists(dir.resolve(task.fileName)) }
+        }
+        mutate { list -> list.filterNot { it.id == id } }
+    }
+
     /**
      * Queues a download into [Settings.downloadsDir]. Returns the queued task's id.
      */
-    fun add(settings: Settings, title: String, url: String, headers: Map<String, String> = emptyMap()): String {
+    fun add(
+        settings: Settings,
+        title: String,
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        subtitles: List<SubtitleTrack> = emptyList(),
+    ): String {
         val id = "dl-${Random.nextLong(Long.MAX_VALUE)}"
         val fileName = guessFileName(title, url)
         mutate { it + DownloadTask(id = id, title = title, url = url, fileName = fileName) }
@@ -92,13 +122,26 @@ object DownloadManager {
         val connections = settings.concurrentConnections.coerceIn(1, 10)
         val dir = Paths.get(settings.downloadsDir)
 
-        scope.launch {
+        val job = scope.launch {
             semaphore.withPermit {
                 patch(id) { it.copy(state = DownloadState.RUNNING) }
                 val result = runCatching { download(id, url, headers, dir.resolve(fileName), connections) }
                 result.fold(
                     onSuccess = { total ->
                         patch(id) { it.copy(state = DownloadState.DONE, totalBytes = total, doneBytes = total) }
+                        // The file is complete, so the subtitle tracks can be stored beside it —
+                        // that is what "Download subtitles" in General turns on.
+                        if (settings.downloadSubtitles && subtitles.isNotEmpty()) {
+                            val saved = subtitles.mapNotNull { track ->
+                                Subtitles.saveBeside(
+                                    dir.resolve(fileName),
+                                    Subtitles.optionOf(track),
+                                )
+                            }
+                            patch(id) {
+                                it.copy(subtitles = saved.map { path -> path.fileName.toString() })
+                            }
+                        }
                     },
                     onFailure = { error ->
                         patch(id) {
@@ -108,6 +151,7 @@ object DownloadManager {
                 )
             }
         }
+        jobs[id] = job
         return id
     }
 
@@ -202,10 +246,12 @@ object DownloadManager {
         patch(id) { it.copy(totalBytes = total) }
 
         val chunkSize = total / connections
-        val jobs = (0 until connections).map { index ->
+        // Children of the caller's job, so cancelling the download stops every connection.
+        coroutineScope {
+        val chunks = (0 until connections).map { index ->
             val start = index * chunkSize
             val end = if (index == connections - 1) total - 1 else start + chunkSize - 1
-            scope.launch {
+            launch {
                 val request = applyHeaders(
                     HttpRequest.newBuilder(URI.create(url))
                         .timeout(Duration.ofMinutes(30))
@@ -231,7 +277,8 @@ object DownloadManager {
                 }
             }
         }
-        jobs.forEach { it.join() }
+        chunks.forEach { it.join() }
+        }
         return total
     }
 

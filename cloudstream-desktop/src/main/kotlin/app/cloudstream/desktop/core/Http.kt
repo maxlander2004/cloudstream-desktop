@@ -23,8 +23,22 @@ object Http {
         .connectTimeout(Duration.ofSeconds(15))
         .build()
 
+    /** The settings whose Network & Proxy toggles rewrite every request made here. */
+    @Volatile
+    private var policy: Settings? = null
+
+    fun use(settings: Settings) {
+        policy = settings
+    }
+
+    /** Clone site bypass and the GitHub proxy, applied the way the original applies them. */
+    internal fun rewrite(url: String): String {
+        val settings = policy ?: return url
+        return Network.rewrite(url, settings.cloneSite, settings.githubProxy)
+    }
+
     private fun request(url: String, timeout: Duration): HttpRequest =
-        HttpRequest.newBuilder(URI.create(url))
+        HttpRequest.newBuilder(URI.create(rewrite(url)))
             .timeout(timeout)
             .header("User-Agent", UA)
             .GET()

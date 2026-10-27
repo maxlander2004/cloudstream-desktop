@@ -2,7 +2,8 @@ package app.cloudstream.desktop.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,7 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
@@ -33,8 +34,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,8 +56,8 @@ import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.ItemType
 import app.cloudstream.desktop.core.AppUpdates
-import app.cloudstream.desktop.core.AppVersion
 import app.cloudstream.desktop.core.Backup
+import app.cloudstream.desktop.core.Doh
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.Settings
 import app.cloudstream.desktop.core.UpdateCheck
@@ -63,21 +66,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.Desktop
-import java.awt.FileDialog
-import java.awt.Frame
-import java.nio.file.Paths
-import javax.swing.JFileChooser
 
 /** Which settings section is open, mirroring the original app's settings pages. */
-enum class SettingsPage(val label: String, val icon: ImageVector) {
-    Root("Settings", Icons.Outlined.Palette),
-    General("General", Icons.Outlined.Language),
-    Player("Player", Icons.Outlined.PlayCircle),
-    Providers("Providers", Icons.Outlined.Extension),
-    Layout("Layout", Icons.Outlined.Layers),
-    UpdatesBackup("Updates and Backup", Icons.Outlined.Backup),
-    Extensions("Extensions", Icons.Outlined.Extension),
-    Accounts("Accounts and Security", Icons.Outlined.Security),
+enum class SettingsPage(val label: String, val icon: ImageVector, val summary: String) {
+    Root("Settings", Icons.Outlined.Palette, ""),
+    General("General", Icons.Outlined.Language, "Downloads, player command, network"),
+    Player("Player", Icons.Outlined.PlayCircle, "Playback and subtitle options"),
+    Providers("Providers", Icons.Outlined.Extension, "Languages, media types, NSFW"),
+    Ui("UI", Icons.Outlined.Slideshow, "App theme, accent color, poster UI"),
+    Layout("Layout", Icons.Outlined.Layers, "Poster size and title placement"),
+    UpdatesBackup("Updates and Backup", Icons.Outlined.Backup, "App updates, plugins, backup"),
+    Extensions("Extensions", Icons.Outlined.Extension, "Install and manage extensions"),
+    Accounts("Accounts and Security", Icons.Outlined.Security, "Account and security settings"),
 }
 
 // ------------------------------------------------------------------ shared pieces
@@ -223,7 +223,7 @@ private fun ChoiceDialog(
                             }
                             .padding(vertical = 8.dp, horizontal = 4.dp),
                     ) {
-                        RadioButton(selected = value == selected)
+                        RadioButton(selected = value == selected, onClick = null)
                         Spacer(Modifier.width(10.dp))
                         Text(label, color = MaterialTheme.colorScheme.onSurface)
                     }
@@ -234,26 +234,456 @@ private fun ChoiceDialog(
     )
 }
 
+// ------------------------------------------------------------------ general
+
 @Composable
-private fun RadioButton(selected: Boolean) {
-    Box(
-        Modifier
-            .size(18.dp)
-            .clip(CircleShape)
-            .background(
-                if (selected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-            ),
+fun GeneralSettings(
+    settings: Settings,
+    onBack: () -> Unit,
+    onStatus: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var dohPicker by remember { mutableStateOf(false) }
+    SectionHeader("General", onBack)
+
+    SectionLabel("Downloads")
+    SwitchRow(
+        title = "Download subtitles",
+        subtitle = "Save subtitle tracks next to the downloaded file",
+        checked = settings.downloadSubtitles,
+        onCheckedChange = {
+            settings.downloadSubtitles = it
+            onStatus(if (it) "Subtitles enabled" else "Subtitles disabled")
+        },
+    )
+    SwitchRow(
+        title = "Archive downloaded files",
+        subtitle = "Store finished downloads in the archive folder",
+        checked = settings.archiveDownloads,
+        onCheckedChange = {
+            settings.archiveDownloads = it
+            onStatus("Archive setting updated")
+        },
+    )
+
+    SectionLabel("Player")
+    OutlinedTextField(
+        value = settings.playerCommand,
+        onValueChange = { settings.playerCommand = it },
+        label = { Text("Player command") },
+        placeholder = { Text("mpv --no-video %s") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+
+    SectionLabel("Network & Proxy")
+    OutlinedTextField(
+        value = settings.cloneSite,
+        onValueChange = { settings.cloneSite = it },
+        label = { Text("Clone site bypass") },
+        placeholder = { Text("originalUrl=replacementUrl") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+
+    SettingsRow(
+        title = "DNS-over-HTTPS",
+        subtitle = "Name lookups go through the chosen resolver",
+        onClick = { dohPicker = true },
+        trailing = {
+            Text(
+                Settings.dohProviders[settings.doh] ?: "Off",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 13.sp,
+            )
+        },
+    )
+    if (dohPicker) {
+        ChoiceDialog(
+            title = "DNS-over-HTTPS",
+            choices = Settings.dohProviders.map { (value, label) -> value to label },
+            selected = settings.doh,
+            onSelect = { value ->
+                settings.doh = value
+                onStatus(
+                    if (Doh.endpoint(value) == null) {
+                        "DNS-over-HTTPS off — using the system resolver"
+                    } else {
+                        "DNS-over-HTTPS: ${Settings.dohProviders[value]}"
+                    },
+                )
+            },
+            onDismiss = { dohPicker = false },
+        )
+    }
+
+    SettingsRow(
+        title = "Github proxy (jsDelivr)",
+        subtitle = "Bypass raw.githubusercontent.com blocking",
+        trailing = { Switch(checked = settings.githubProxy, onCheckedChange = { settings.githubProxy = it }) },
+    )
+
+    Spacer(Modifier.height(14.dp))
+    Button(
+        onClick = {
+            scope.launch {
+                onStatus("Saving…")
+                withContext(Dispatchers.IO) { settings.save() }
+                onStatus("Settings saved")
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Save settings")
+    }
+}
+
+// ------------------------------------------------------------------ player
+
+@Composable
+fun PlayerSettings(
+    settings: Settings,
+    onBack: () -> Unit,
+) {
+    SectionHeader("Player", onBack)
+
+    SectionLabel("In-app playback")
+    SettingsRow(
+        title = "In-app player (VLC)",
+        subtitle = VideoEngine.description(),
+        trailing = {
+            Switch(
+                checked = settings.inAppPlayer && VideoEngine.available,
+                onCheckedChange = { settings.inAppPlayer = it },
+                enabled = VideoEngine.available,
+            )
+        },
+    )
+    SwitchRow(
+        title = "Autoplay next episode",
+        subtitle = "Start the next episode when one finishes",
+        checked = settings.autoplayNext,
+        onCheckedChange = { settings.autoplayNext = it },
+    )
+    SwitchRow(
+        title = "Resume from last position",
+        subtitle = "Continue where playback was left",
+        checked = settings.resumePlayback,
+        onCheckedChange = { settings.resumePlayback = it },
+    )
+
+    SectionLabel("Subtitles")
+    SwitchRow(
+        title = "Load subtitles automatically",
+        subtitle = "Turn on a subtitle track when an episode starts",
+        checked = settings.subtitleAutoLoad,
+        onCheckedChange = { settings.subtitleAutoLoad = it },
+    )
+    OutlinedTextField(
+        value = settings.subtitleLanguage,
+        onValueChange = { settings.subtitleLanguage = it },
+        label = { Text("Preferred subtitle language") },
+        placeholder = { Text("en") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Text(
+        "Subtitle files saved next to a download are picked up automatically.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
+    )
+
+    OutlinedTextField(
+        value = settings.vlcPath,
+        onValueChange = { settings.vlcPath = it },
+        label = { Text("libvlc folder (optional)") },
+        placeholder = { Text("/usr/lib/vlc") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+
+    SectionLabel("Fallback player")
+    OutlinedTextField(
+        value = settings.playerCommand,
+        onValueChange = { settings.playerCommand = it },
+        label = { Text("External player command") },
+        placeholder = { Text("mpv --no-video %s") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
     )
 }
+
+// ------------------------------------------------------------------ providers
+
+@Composable
+fun ProvidersSettings(
+    settings: Settings,
+    languages: List<String>,
+    testTargets: List<Catalog>,
+    onBack: () -> Unit,
+) {
+    SectionHeader("Providers", onBack)
+
+    SectionLabel("Provider languages")
+    if (languages.isEmpty()) {
+        Text(
+            "No provider languages configured.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+        )
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            languages.forEach { lang ->
+                FilterChip(
+                    selected = lang in settings.providerLanguages,
+                    onClick = {
+                        settings.providerLanguages = if (lang in settings.providerLanguages) {
+                            settings.providerLanguages - lang
+                        } else {
+                            settings.providerLanguages + lang
+                        }
+                    },
+                    label = { Text(lang.uppercase()) },
+                )
+            }
+        }
+    }
+
+    SectionLabel("Media types")
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        MediaTypeChips.forEach { (media, label) ->
+            FilterChip(
+                selected = settings.preferredMedia.isEmpty() || media in settings.preferredMedia,
+                onClick = {
+                    val selected = settings.preferredMedia
+                    settings.preferredMedia = when {
+                        selected.isEmpty() -> MediaTypeChips.map { it.first } - media
+                        media in selected -> selected - media
+                        else -> selected + media
+                    }
+                },
+                label = { Text(label) },
+            )
+        }
+    }
+
+    SwitchRow(
+        title = "Show dubbed / subbed",
+        subtitle = "Show both dubbed and subbed versions",
+        checked = settings.displayDubbedSubbed,
+        onCheckedChange = { settings.displayDubbedSubbed = it },
+    )
+
+    SwitchRow(
+        title = "NSFW providers",
+        subtitle = "Include providers flagged as NSFW",
+        checked = settings.nsfwEnabled,
+        onCheckedChange = { settings.nsfwEnabled = it },
+    )
+}
+
+// ------------------------------------------------------------------ layout
+
+@Composable
+fun LayoutSettings(
+    settings: Settings,
+    dark: Boolean,
+    onThemeChange: (Boolean) -> Unit,
+    onBack: () -> Unit,
+) {
+    SectionHeader("Layout", onBack)
+
+    SwitchRow(
+        title = "Dark theme",
+        subtitle = "Use dark theme throughout the app",
+        checked = dark,
+        onCheckedChange = onThemeChange,
+    )
+
+    SliderRow(
+        title = "Poster size",
+        subtitle = "More columns = smaller posters",
+        value = settings.posterSize,
+        range = 0..6,
+        onChange = { settings.posterSize = it },
+    )
+
+    SwitchRow(
+        title = "Title under poster",
+        subtitle = "Show the title below the artwork",
+        checked = settings.posterTitleUnder,
+        onCheckedChange = { settings.posterTitleUnder = it },
+    )
+
+    SwitchRow(
+        title = "Advanced search",
+        subtitle = "Search all providers at once",
+        checked = settings.advancedSearch,
+        onCheckedChange = { settings.advancedSearch = it },
+    )
+}
+
+// ------------------------------------------------------------------ ui
+
+@Composable
+fun UiSettings(
+    settings: Settings,
+    dark: Boolean,
+    onThemeChange: (Boolean) -> Unit,
+    onAccentChange: (String) -> Unit,
+    onBack: () -> Unit,
+    onStatus: (String) -> Unit,
+) {
+    var showTheme by remember { mutableStateOf(false) }
+    var showPrimaryColor by remember { mutableStateOf(false) }
+    var showPosterUi by remember { mutableStateOf(false) }
+
+    SectionHeader("UI", onBack)
+
+    SettingsRow(
+        title = "App theme",
+        subtitle = "Dark or light appearance",
+        trailing = { TextButton(onClick = { showTheme = true }) { Text(if (dark) "Dark" else "Light") } },
+    )
+
+    SettingsRow(
+        title = "Accent color",
+        subtitle = "Primary brand color",
+        trailing = { TextButton(onClick = { showPrimaryColor = true }) { Text(settings.accentColor) } },
+    )
+
+    SettingsRow(
+        title = "Poster UI",
+        subtitle = "Where the title is drawn on the poster",
+        trailing = {
+            TextButton(onClick = { showPosterUi = true }) {
+                Text(if (settings.posterTitleUnder) "Below" else "Over")
+            }
+        },
+    )
+
+    if (showTheme) {
+        ChoiceDialog(
+            title = "App theme",
+            choices = listOf("dark" to "Dark", "light" to "Light"),
+            selected = if (dark) "dark" else "light",
+            onSelect = {
+                settings.appTheme = it
+                onThemeChange(it == "dark")
+                showTheme = false
+            },
+            onDismiss = { showTheme = false },
+        )
+    }
+
+    if (showPrimaryColor) {
+        ChoiceDialog(
+            title = "Accent color",
+            choices = accentColorOptions(),
+            selected = settings.accentColor,
+            onSelect = {
+                settings.accentColor = it
+                onAccentChange(it)
+                onStatus("Accent color updated")
+                showPrimaryColor = false
+            },
+            onDismiss = { showPrimaryColor = false },
+        )
+    }
+
+    if (showPosterUi) {
+        // Upstream's Poster UI choice: the title over the artwork or underneath it.
+        val options = listOf(false to "Title over poster", true to "Title below poster")
+        AlertDialog(
+            onDismissRequest = { showPosterUi = false },
+            title = { Text("Poster UI") },
+            text = {
+                Column {
+                    options.forEach { (under, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    settings.posterTitleUnder = under
+                                    showPosterUi = false
+                                    onStatus(if (under) "Titles below posters" else "Titles over posters")
+                                }
+                                .padding(vertical = 8.dp, horizontal = 4.dp),
+                        ) {
+                            RadioButton(selected = settings.posterTitleUnder == under, onClick = null)
+                            Spacer(Modifier.width(10.dp))
+                            Text(label, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showPosterUi = false }) { Text("Close") } },
+        )
+    }
+}
+
+private fun accentColorOptions(): List<Pair<String, String>> = listOf(
+    "#3D50FA" to "Blue (default)",
+    "#F53B66" to "Red",
+    "#6200EA" to "Purple",
+    "#00BFA5" to "Green",
+    "#FF1493" to "Pink",
+    "#FF9800" to "Orange",
+    "#4CAF50" to "Light green",
+    "#2196F3" to "Light blue",
+)
+
+private fun posterUiOptions(): List<Pair<String, String>> = listOf(
+    "under" to "Title below poster",
+    "over" to "Title over poster",
+)
 
 // ------------------------------------------------------------------ root
 
 @Composable
 fun SettingsRootScreen(onOpen: (SettingsPage) -> Unit) {
-    val sections = listOf(
-        SettingsPage.General, SettingsPage.Player, SettingsPage.Providers, SettingsPage.Layout,
-        SettingsPage.UpdatesBackup, SettingsPage.Extensions, SettingsPage.Accounts,
+    val sections: List<SettingsPage> = listOf(
+        SettingsPage.General,
+        SettingsPage.Player,
+        SettingsPage.Providers,
+        SettingsPage.Ui,
+        SettingsPage.Layout,
+        SettingsPage.UpdatesBackup,
+        SettingsPage.Extensions,
+        SettingsPage.Accounts,
     )
 
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -271,435 +701,16 @@ fun SettingsRootScreen(onOpen: (SettingsPage) -> Unit) {
     sections.forEach { page ->
         SettingsRow(
             title = page.label,
+            subtitle = page.summary,
             icon = page.icon,
             onClick = { onOpen(page) },
-            trailing = {
-                Icon(
-                    Icons.Outlined.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-    }
-
-    Spacer(Modifier.height(18.dp))
-    Text(
-        "${AppVersion.VALUE} · desktop build",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-        modifier = Modifier.fillMaxWidth(),
-        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-    )
-}
-
-// ------------------------------------------------------------------ General
-
-@Composable
-fun GeneralSettings(settings: Settings, onBack: () -> Unit, onStatus: (String) -> Unit) {
-    var showDisclaimer by remember { mutableStateOf(false) }
-    var showCloneDialog by remember { mutableStateOf(false) }
-    var showDohDialog by remember { mutableStateOf(false) }
-
-    Column {
-        SectionHeader("General", onBack)
-
-        SectionLabel("App")
-        SettingsRow(title = "App Language", subtitle = "English", enabled = false)
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(title = "Disclaimer", onClick = { showDisclaimer = true })
-        Spacer(Modifier.height(6.dp))
-
-        SectionLabel("Downloads")
-        SettingsRow(
-            title = "Download path",
-            subtitle = settings.downloadsDir,
-            onClick = {
-                val chooser = JFileChooser(settings.downloadsDir).apply {
-                    fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
-                    dialogTitle = "Choose the download folder"
-                }
-                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-                    settings.downloadsDir = chooser.selectedFile.absolutePath
-                    onStatus("Download folder set")
-                }
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        SliderRow(
-            title = "Parallel downloads",
-            subtitle = "How many different items that can be downloaded in parallel",
-            value = settings.parallelDownloads,
-            range = 1..10,
-            onChange = { settings.parallelDownloads = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SliderRow(
-            title = "Concurrent connections",
-            subtitle = "How many concurrent connections each download can use while downloading",
-            value = settings.concurrentConnections,
-            range = 1..10,
-            onChange = { settings.concurrentConnections = it },
-        )
-        Spacer(Modifier.height(6.dp))
-
-        SectionLabel("ISP Bypasses")
-        SettingsRow(
-            title = "Clone site",
-            subtitle = settings.cloneSite.ifBlank { "Add a clone of an existing site, with a different URL" },
-            onClick = { showCloneDialog = true },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "DNS over HTTPS",
-            subtitle = "Useful for bypassing ISP blocks",
-            onClick = { showDohDialog = true },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "GitHub Proxy",
-            subtitle = "Bypass blocking of raw github URLs using jsDelivr. May cause updates to be delayed by few days.",
-            checked = settings.githubProxy,
-            onCheckedChange = { settings.githubProxy = it },
-        )
-        Spacer(Modifier.height(6.dp))
-
-        SectionLabel("Links")
-        SettingsRow(
-            title = "Github",
-            subtitle = AppUpdates.REPOSITORY.removeSuffix("/cloudstream-desktop").removePrefix("maxlander2004/")
-                .let { "https://github.com/maxlander2004/cloudstream-desktop" },
-            onClick = {
-                runCatching {
-                    Desktop.getDesktop().browse(java.net.URI("https://github.com/maxlander2004/cloudstream-desktop"))
-                }
-            },
-        )
-    }
-
-    if (showDisclaimer) {
-        AlertDialog(
-            onDismissRequest = { showDisclaimer = false },
-            title = { Text("Disclaimer") },
-            text = {
-                Text(
-                    "This application does not host or provide any media. It only loads " +
-                        "extensions built by the community; what they list is their responsibility.",
-                )
-            },
-            confirmButton = { TextButton(onClick = { showDisclaimer = false }) { Text("Close") } },
-        )
-    }
-
-    if (showCloneDialog) {
-        var text by remember { mutableStateOf(settings.cloneSite) }
-        AlertDialog(
-            onDismissRequest = { showCloneDialog = false },
-            title = { Text("Clone site") },
-            text = {
-                Column {
-                    Text(
-                        "originalUrl=replacementUrl — providers whose main site is blocked are " +
-                            "pointed at the clone, the same way the Android app does.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it },
-                        singleLine = true,
-                        placeholder = { Text("https://example.com=https://mirror.example") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        settings.cloneSite = text
-                        showCloneDialog = false
-                        onStatus("Clone site saved")
-                    },
-                ) { Text("Save") }
-            },
-            dismissButton = { TextButton(onClick = { showCloneDialog = false }) { Text("Cancel") } },
-        )
-    }
-
-    if (showDohDialog) {
-        ChoiceDialog(
-            title = "DNS over HTTPS",
-            choices = Settings.dohProviders.map { it.key to it.value },
-            selected = settings.doh,
-            onSelect = {
-                settings.doh = it
-                onStatus("DNS over HTTPS: ${Settings.dohProviders[it]}")
-            },
-            onDismiss = { showDohDialog = false },
+            trailing = { Icon(Icons.Outlined.KeyboardArrowRight, contentDescription = null) },
         )
     }
 }
 
-// ------------------------------------------------------------------ Player
+// ------------------------------------------------------------------ updates & backup
 
-@Composable
-fun PlayerSettings(settings: Settings, onBack: () -> Unit) {
-    Column {
-        SectionHeader("Player", onBack)
-
-        SectionLabel("Playback")
-        Text(
-            "Streams are handed to an external player, e.g. mpv or the full path to vlc.exe. " +
-                "Leave empty to open links in your default browser.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 12.sp,
-        )
-        Spacer(Modifier.height(8.dp))
-
-        var command by remember { mutableStateOf(settings.playerCommand) }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = command,
-                onValueChange = { command = it },
-                label = { Text("Command") },
-                singleLine = true,
-                modifier = Modifier.width(420.dp),
-            )
-            Spacer(Modifier.width(12.dp))
-            Button(onClick = { settings.playerCommand = command }) { Text("Save") }
-        }
-    }
-}
-
-// ------------------------------------------------------------------ Providers
-
-@Composable
-fun ProvidersSettings(
-    settings: Settings,
-    languages: List<String>,
-    testTargets: List<Catalog>,
-    onBack: () -> Unit,
-) {
-    var showLanguages by remember { mutableStateOf(false) }
-    var showMedia by remember { mutableStateOf(false) }
-    var testResults by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
-    var testing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    Column {
-        SectionHeader("Providers", onBack)
-
-        SettingsRow(
-            title = "Extension languages",
-            subtitle = settings.providerLanguages.joinToString().ifBlank { "All languages" },
-            onClick = { showLanguages = true },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "Preferred media",
-            subtitle = settings.preferredMedia.joinToString().ifBlank { "All media" },
-            onClick = { showMedia = true },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Display Dubbed/Subbed Anime",
-            subtitle = "Filters anime results by subtitles/dub where the provider reports it",
-            checked = settings.displayDubbedSubbed,
-            onCheckedChange = { settings.displayDubbedSubbed = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Enable NSFW on supported Extensions",
-            subtitle = "Shows adult results from extensions that provide them",
-            checked = settings.nsfwEnabled,
-            onCheckedChange = { settings.nsfwEnabled = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "Test all Extensions",
-            subtitle = "Runs the home page request of every loaded extension. This test is meant " +
-                "for developers and does not verify or deny the working of any extension.",
-            enabled = !testing,
-            onClick = {
-                testing = true
-                testResults = null
-                scope.launch {
-                    val results = testTargets.map { catalog ->
-                        val outcome = withContext(Dispatchers.IO) {
-                            withTimeoutOrNull(20_000) {
-                                runCatching { catalog.browse() }.fold(
-                                    onSuccess = { "ok · ${it.size} items" },
-                                    onFailure = { "failed · ${it.message ?: "error"}" },
-                                )
-                            } ?: "timed out"
-                        }
-                        catalog.name to outcome
-                    }
-                    testResults = results
-                    testing = false
-                }
-            },
-        )
-
-        if (testing) {
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(10.dp))
-                Text("Testing ${testTargets.size} extension(s)…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-            }
-        }
-
-        testResults?.let { results ->
-            Spacer(Modifier.height(12.dp))
-            results.forEach { (name, outcome) ->
-                Text(
-                    "$name — $outcome",
-                    color = if (outcome.startsWith("ok")) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp,
-                )
-            }
-        }
-    }
-
-    if (showLanguages) {
-        val selected = remember { mutableStateOf(settings.providerLanguages.toSet()) }
-        AlertDialog(
-            onDismissRequest = {
-                settings.providerLanguages = selected.value.toList()
-                showLanguages = false
-            },
-            title = { Text("Extension languages") },
-            text = {
-                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = selected.value.isEmpty(),
-                        onClick = { selected.value = emptySet() },
-                        label = { Text("All") },
-                    )
-                    languages.sorted().forEach { language ->
-                        FilterChip(
-                            selected = language in selected.value,
-                            onClick = {
-                                selected.value =
-                                    if (language in selected.value) selected.value - language
-                                    else selected.value + language
-                            },
-                            label = { Text(language.uppercase()) },
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = {
-                settings.providerLanguages = selected.value.toList()
-                showLanguages = false
-            }) { Text("Done") } },
-        )
-    }
-
-    if (showMedia) {
-        val selected = remember { mutableStateOf(settings.preferredMedia.toSet()) }
-        val options = listOf(
-            ItemType.MOVIE.name to "Movies",
-            ItemType.SERIES.name to "Series",
-            ItemType.ANIME.name to "Anime",
-        )
-        AlertDialog(
-            onDismissRequest = {
-                settings.preferredMedia = selected.value.toList()
-                showMedia = false
-            },
-            title = { Text("Preferred media") },
-            text = {
-                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = selected.value.isEmpty(),
-                        onClick = { selected.value = emptySet() },
-                        label = { Text("All") },
-                    )
-                    options.forEach { (value, label) ->
-                        FilterChip(
-                            selected = value in selected.value,
-                            onClick = {
-                                selected.value =
-                                    if (value in selected.value) selected.value - value
-                                    else selected.value + value
-                            },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = {
-                settings.preferredMedia = selected.value.toList()
-                showMedia = false
-            }) { Text("Done") } },
-        )
-    }
-}
-
-// ------------------------------------------------------------------ Layout
-
-@Composable
-fun LayoutSettings(
-    settings: Settings,
-    dark: Boolean,
-    onThemeChange: (Boolean) -> Unit,
-    onBack: () -> Unit,
-) {
-    var showTheme by remember { mutableStateOf(false) }
-
-    Column {
-        SectionHeader("Layout", onBack)
-
-        SectionLabel("Looks")
-        SettingsRow(
-            title = "App theme",
-            subtitle = if (dark) "Dark" else "Light",
-            onClick = { showTheme = true },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Poster title location",
-            subtitle = "Put the title under the poster",
-            checked = settings.posterTitleUnder,
-            onCheckedChange = { settings.posterTitleUnder = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SliderRow(
-            title = "Poster size",
-            subtitle = "Changes size of posters",
-            value = settings.posterSize,
-            range = 0..6,
-            onChange = { settings.posterSize = it },
-        )
-
-        SectionLabel("Features")
-        SwitchRow(
-            title = "Advanced Search",
-            subtitle = "Gives you the search results separated by provider",
-            checked = settings.advancedSearch,
-            onCheckedChange = { settings.advancedSearch = it },
-        )
-    }
-
-    if (showTheme) {
-        ChoiceDialog(
-            title = "App theme",
-            choices = listOf("dark" to "Dark", "light" to "Light"),
-            selected = if (dark) "dark" else "light",
-            onSelect = {
-                settings.appTheme = it
-                onThemeChange(it == "dark")
-            },
-            onDismiss = { showTheme = false },
-        )
-    }
-}
-
-// ------------------------------------------------------------------ Updates and Backup
 
 @Composable
 fun UpdatesBackupSettings(
@@ -710,170 +721,153 @@ fun UpdatesBackupSettings(
     onUpdatePlugins: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var checking by remember { mutableStateOf(false) }
-    var update by remember { mutableStateOf<UpdateCheck?>(null) }
-    var restoreResult by remember { mutableStateOf<String?>(null) }
 
-    Column {
-        SectionHeader("Updates and Backup", onBack)
+    SectionHeader("Updates and Backup", onBack)
 
-        SectionLabel("App updates")
-        SettingsRow(
-            title = "Check for Update",
-            subtitle = when {
-                checking -> "Checking…"
-                update?.newer == true -> "Version ${update!!.version} is available"
-                update != null -> "You are on the latest version (${AppVersion.VALUE})"
-                else -> AppVersion.VALUE
-            },
-            enabled = !checking,
-            onClick = {
-                checking = true
-                scope.launch {
-                    update = runCatching { AppUpdates.check(settings.installPrerelease) }.getOrNull()
-                    checking = false
-                    onStatus(
-                        when {
-                            update?.newer == true -> "Update ${update!!.version} available"
-                            update != null -> "App is up to date"
-                            else -> "Could not reach GitHub"
-                        },
+    SwitchRow(
+        title = "Check for app updates on startup",
+        subtitle = "Show a banner when a newer version is available",
+        checked = settings.showAppUpdates,
+        onCheckedChange = { settings.showAppUpdates = it },
+    )
+
+    SwitchRow(
+        title = "Automatically update plugins",
+        subtitle = "Update installed extensions from the repository",
+        checked = settings.autoPluginUpdates,
+        onCheckedChange = { settings.autoPluginUpdates = it },
+    )
+
+    SwitchRow(
+        title = "Automatically download plugins",
+        subtitle = "Install extensions that are missing locally",
+        checked = settings.autoDownloadPlugins,
+        onCheckedChange = { settings.autoDownloadPlugins = it },
+    )
+
+    SettingsRow(
+        title = "Refresh extension repositories",
+        subtitle = "Re-fetch the repository list from the configured URLs",
+        onClick = {
+            scope.launch {
+                onStatus("Refreshing repositories…")
+                withContext(Dispatchers.IO) { onRefreshExtensions() }
+                onStatus("Repository refresh finished")
+            }
+        },
+        trailing = { Icon(Icons.Outlined.KeyboardArrowRight, contentDescription = null) },
+    )
+
+    SettingsRow(
+        title = "Update plugins now",
+        subtitle = "Update everything the repositories offer newer versions of",
+        onClick = {
+            scope.launch {
+                onStatus("Updating plugins…")
+                withContext(Dispatchers.IO) { onUpdatePlugins() }
+                onStatus("Plugin update finished")
+            }
+        },
+        trailing = { Icon(Icons.Outlined.KeyboardArrowRight, contentDescription = null) },
+    )
+
+    SectionLabel("Backup")
+    OutlinedTextField(
+        value = settings.backupDir,
+        onValueChange = { settings.backupDir = it },
+        label = { Text("Backup directory") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Button(
+        onClick = {
+            scope.launch {
+                onStatus("Creating backup…")
+                val zip = withContext(Dispatchers.IO) {
+                    Backup.create(
+                        dir = settings.backupDir,
+                        extensionsDir = ExtensionHost.ensureExtensionsDir(),
                     )
                 }
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Show app updates",
-            subtitle = "Automatically search for new updates after starting the app.",
-            checked = settings.showAppUpdates,
-            onCheckedChange = { settings.showAppUpdates = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Install pre-release version",
-            checked = settings.installPrerelease,
-            onCheckedChange = { settings.installPrerelease = it },
-        )
-
-        SectionLabel("Backup")
-        SettingsRow(
-            title = "Back up data",
-            subtitle = "Settings and installed extensions into ${settings.backupDir}",
-            onClick = {
-                scope.launch {
-                    val result = runCatching {
-                        withContext(Dispatchers.IO) {
-                            Backup.create(settings.backupDir, ExtensionHost.ensureExtensionsDir()).fileName.toString()
-                        }
-                    }
-                    onStatus(result.fold({ "Backup written: $it" }, { "Backup failed: ${it.message}" }))
-                }
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "Restore data from backup",
-            subtitle = restoreResult,
-            onClick = {
-                val dialog = FileDialog(null as Frame?, "Select a CloudStream backup", FileDialog.LOAD)
-                dialog.isVisible = true
-                val file = dialog.file
-                val directory = dialog.directory
-                dialog.dispose()
-                if (file == null || directory == null) return@SettingsRow
-                scope.launch {
-                    val result = runCatching {
-                        withContext(Dispatchers.IO) {
-                            Backup.restore(
-                                Paths.get(directory, file),
-                                ExtensionHost.ensureExtensionsDir(),
-                            )
-                        }
-                    }
-                    restoreResult = result.getOrNull()
-                    onStatus(result.fold({ it }, { "Restore failed: ${it.message}" }))
-                    onRefreshExtensions()
-                }
-            },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "Backup folder location",
-            subtitle = settings.backupDir,
-            onClick = {
-                val chooser = JFileChooser(settings.backupDir).apply {
-                    fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
-                    dialogTitle = "Choose the backup folder"
-                }
-                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
-                    settings.backupDir = chooser.selectedFile.absolutePath
-                }
-            },
-        )
-
-        SectionLabel("Extensions")
-        SwitchRow(
-            title = "Automatic plugin updates",
-            subtitle = "Update installed extensions when a newer version is published",
-            checked = settings.autoPluginUpdates,
-            onCheckedChange = { settings.autoPluginUpdates = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SwitchRow(
-            title = "Automatically download plugins",
-            subtitle = "Automatically install all not yet installed plugins from added repositories",
-            checked = settings.autoDownloadPlugins,
-            onCheckedChange = { settings.autoDownloadPlugins = it },
-        )
-        Spacer(Modifier.height(6.dp))
-        SettingsRow(
-            title = "Update Plugins",
-            subtitle = "Update plugins manually",
-            onClick = onUpdatePlugins,
-        )
+                onStatus("Backup created: ${zip.fileName}")
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Create backup now")
     }
 
-    update?.takeIf { it.newer }?.let { info ->
-        AlertDialog(
-            onDismissRequest = { update = null },
-            title = { Text("Update available") },
-            text = { Text("Version ${info.version} is available. Open the release page to download it.") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        runCatching { Desktop.getDesktop().browse(java.net.URI(info.url)) }
-                        update = null
-                    },
-                ) { Text("Open download page") }
-            },
-            dismissButton = { TextButton(onClick = { update = null }) { Text("Later") } },
-        )
+    Spacer(Modifier.height(14.dp))
+    Button(
+        onClick = {
+            scope.launch {
+                onStatus("Checking for updates…")
+                val check = withTimeoutOrNull(15_000) {
+                    withContext(Dispatchers.IO) { AppUpdates.check(settings.installPrerelease) }
+                }
+                if (check?.newer == true) {
+                    onStatus("Update ${check.version} available")
+                    runCatching {
+                        Desktop.getDesktop().browse(java.net.URI(check.url))
+                    }
+                } else {
+                    onStatus(if (check?.newer == true) "Update available" else "No update available")
+                }
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Check for app updates")
     }
 }
 
-// ------------------------------------------------------------------ Accounts and Security
+// ------------------------------------------------------------------ installed extensions list
 
 @Composable
-fun AccountsSettings(onBack: () -> Unit) {
-    Column {
-        SectionHeader("Accounts and Security", onBack)
-
-        SectionLabel("Accounts")
-        listOf("MAL", "Kitsu", "AniList", "Simkl", "OpenSubtitles", "SubDL", "AnimeSkip").forEach { account ->
-            SettingsRow(
-                title = account,
-                subtitle = "Account sync runs on upstream servers; not available on desktop yet",
-                enabled = false,
-            )
-            Spacer(Modifier.height(6.dp))
-        }
-
-        SectionLabel("Security")
-        SettingsRow(
-            title = "Lock with Biometrics",
-            subtitle = "Fingerprint, Face ID and PIN are Android features; not available on desktop",
-            enabled = false,
+internal fun InstalledExtensionsList(
+    extensions: app.cloudstream.desktop.core.ExtensionLoadResult,
+    installing: String?,
+) {
+    if (extensions.loaded.isEmpty()) {
+        Text(
+            "No extensions loaded. Install one from file or refresh repositories.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
         )
+    } else {
+        extensions.loaded.forEach { extension ->
+            val manifest = extension.manifest
+            SettingsRow(
+                title = manifest.name ?: extension.file.fileName.toString(),
+                subtitle = "v${manifest.version ?: 0} · loaded",
+                icon = Icons.Outlined.Extension,
+                trailing = {
+                    if (installing == manifest.name) {
+                        CircularProgressIndicator(Modifier.height(16.dp).width(16.dp), strokeWidth = 2.dp)
+                    }
+                },
+            )
+        }
     }
+}
+
+// ------------------------------------------------------------------ accounts
+
+@Composable
+fun AccountsSettings(
+    onBack: () -> Unit,
+) {
+    SectionHeader("Accounts and Security", onBack)
+
+    Text(
+        "Account and security settings are coming soon.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 13.sp,
+    )
 }

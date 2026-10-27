@@ -45,10 +45,37 @@ private val CloudStreamLight = lightColorScheme(
     error = CsAccent,
 )
 
+/**
+ * The media chips the original shows above the poster grid, in its order, as (the [ItemType]
+ * name the filter uses, the label shown to the user). Upstream also has Asian Drama, Cartoons,
+ * Documentaries, Torrent and Others; the desktop ItemType folds those into OTHER.
+ */
+val MediaTypeChips: List<Pair<String, String>> = listOf(
+    "MOVIE" to "Movies",
+    "SERIES" to "TV Series",
+    "ANIME" to "Anime",
+    "LIVE" to "Livestreams",
+    "NSFW" to "NSFW",
+)
+
+/** Reads the "#RRGGBB" the UI settings store, falling back to the upstream brand blue. */
+fun accentColor(value: String): Color =
+    runCatching { Color(0xFF000000L or value.removePrefix("#").toLong(16)) }
+        .getOrDefault(CsPrimary)
+
+/**
+ * Applies the stored accent color over the upstream dark/light palettes, the way the original's
+ * UI → Primary color setting recolors the app.
+ */
 @Composable
-fun CloudStreamTheme(dark: Boolean = true, content: @Composable () -> Unit) {
+fun CloudStreamTheme(
+    dark: Boolean = true,
+    accent: Color = CsPrimary,
+    content: @Composable () -> Unit,
+) {
+    val base = if (dark) CloudStreamDark else CloudStreamLight
     MaterialTheme(
-        colorScheme = if (dark) CloudStreamDark else CloudStreamLight,
+        colorScheme = base.copy(primary = accent),
         content = content,
     )
 }

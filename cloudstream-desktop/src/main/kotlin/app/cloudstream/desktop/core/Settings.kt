@@ -18,6 +18,10 @@ class Settings {
 
     init {
         runCatching { Files.newInputStream(file).use { props.load(it) } }
+        // The HTTP layer reads these toggles per request, and the resolver reads the DoH
+        // choice per lookup, so both are handed this instance as soon as one exists.
+        Http.use(this)
+        Doh.configure(this)
     }
 
     private fun get(key: String, default: String) = props.getProperty(key, default)
@@ -32,6 +36,36 @@ class Settings {
     var playerCommand: String
         get() = get("player.command", "")
         set(value) = set("player.command", value)
+
+    /** Play inside the app with the embedded VLC engine instead of an external player. */
+    var inAppPlayer: Boolean
+        get() = getBool("player.inApp", true)
+        set(value) = set("player.inApp", value.toString())
+
+    /** Upstream's *Autoplay next episode*. */
+    var autoplayNext: Boolean
+        get() = getBool("player.autoplayNext", true)
+        set(value) = set("player.autoplayNext", value.toString())
+
+    /** Upstream's *Resume from last position*. */
+    var resumePlayback: Boolean
+        get() = getBool("player.resume", true)
+        set(value) = set("player.resume", value.toString())
+
+    /** Turn a subtitle track on as soon as an episode starts, like upstream's auto-select. */
+    var subtitleAutoLoad: Boolean
+        get() = getBool("player.subtitleAuto", true)
+        set(value) = set("player.subtitleAuto", value.toString())
+
+    /** Preferred subtitle language as a short code; empty accepts the first track offered. */
+    var subtitleLanguage: String
+        get() = get("player.subtitleLanguage", "")
+        set(value) = set("player.subtitleLanguage", value.trim().lowercase())
+
+    /** Where to look for libvlc when VLC is not installed in the usual place. */
+    var vlcPath: String
+        get() = get("player.vlcPath", "")
+        set(value) = set("player.vlcPath", value.trim())
 
     // ---------------------------------------------------------------- Repositories
     /**
@@ -76,12 +110,24 @@ class Settings {
     /** One of [dohProviders] keys; applied to the app's own HTTP lookups. */
     var doh: String
         get() = get("bypass.doh", "off")
-        set(value) = set("bypass.doh", value)
+        set(value) {
+            set("bypass.doh", value)
+            // Live: the resolver reads this on every lookup, so no restart is involved.
+            Doh.provider = value
+        }
 
     /** Bypass raw.githubusercontent.com blocking through jsDelivr, like the original toggle. */
     var githubProxy: Boolean
         get() = getBool("bypass.githubProxy", false)
         set(value) = set("bypass.githubProxy", value.toString())
+
+    var downloadSubtitles: Boolean
+        get() = getBool("downloads.subtitles", false)
+        set(value) = set("downloads.subtitles", value.toString())
+
+    var archiveDownloads: Boolean
+        get() = getBool("downloads.archive", false)
+        set(value) = set("downloads.archive", value.toString())
 
     // ---------------------------------------------------------------- Providers
     /** Empty means every language; otherwise provider languages, lowercase. */
@@ -113,13 +159,24 @@ class Settings {
         get() = getInt("layout.posterSize", 2).coerceIn(0, 6)
         set(value) = set("layout.posterSize", value.coerceIn(0, 6).toString())
 
+    /** Defaults to the original's look: the title drawn over the poster. */
     var posterTitleUnder: Boolean
-        get() = getBool("layout.posterTitle", true)
+        get() = getBool("layout.posterTitle", false)
         set(value) = set("layout.posterTitle", value.toString())
+
+    var accentColor: String
+        get() = get("layout.accentColor", "#3D50FA")
+        set(value) = set("layout.accentColor", value)
 
     var advancedSearch: Boolean
         get() = getBool("layout.advancedSearch", true)
         set(value) = set("layout.advancedSearch", value.toString())
+
+    /** Index into the current source list for the chosen homepage provider, like upstream's
+     * home provider selector. -1 means use the first source. */
+    var homepageProviderIndex: Int
+        get() = getInt("layout.homepageProvider", -1)
+        set(value) = set("layout.homepageProvider", value.toString())
 
     // ---------------------------------------------------------------- Updates and Backup
     var showAppUpdates: Boolean
@@ -151,7 +208,7 @@ class Settings {
         )
     }
 
-    private fun save() {
+    internal fun save() {
         runCatching {
             Files.createDirectories(file.parent)
             Files.newOutputStream(file).use { props.store(it, "CloudStream Desktop") }
