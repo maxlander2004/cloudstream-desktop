@@ -7,7 +7,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Kept in step with the release tags this repository publishes. */
 object AppVersion {
-    const val VALUE = "1.1.0"
+    const val VALUE = "1.3.0"
 }
 
 data class UpdateCheck(

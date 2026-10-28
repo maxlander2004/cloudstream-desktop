@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "app.cloudstream.desktop"
-version = "1.1.0"
+version = "1.3.0"
 
 kotlin {
     jvmToolchain(21)
@@ -97,7 +97,7 @@ compose.desktop {
             // .deb is produced on Linux, .dmg on macOS.
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "CloudStream"
-            packageVersion = "1.1.0"
+            packageVersion = "1.3.0"
             description = "CloudStream Desktop"
             vendor = "CloudStream Desktop"
             copyright = "GPL-3.0-or-later"
