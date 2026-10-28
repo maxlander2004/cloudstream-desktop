@@ -113,15 +113,28 @@ tasks.register<Exec>("verifyRuntime") {
 
     doFirst {
         val image = imageDir.get().asFile
-        val runtime = File(image, "lib/runtime")
+
+        // jpackage lays the app image out differently per platform: Linux keeps the jars in
+        // lib/app with lib/runtime beside them, Windows keeps both at the image root. Probe
+        // both layouts instead of assuming the build host's.
+        fun firstDirWithJars(vararg relative: String): File? = relative
+            .map { File(image, it) }
+            .firstOrNull { dir ->
+                dir.listFiles { file -> file.extension == "jar" }?.isNotEmpty() == true
+            }
+
+        val appDir = firstDirWithJars("lib/app", "app")
+            ?: error("No application jars under $image")
+        val runtime = listOf("lib/runtime", "runtime")
+            .map { File(image, it) }
+            .firstOrNull { it.isDirectory }
+            ?: error("Packaged runtime not found under $image")
 
         // Compose ships the jlink image without a java executable (the launcher loads libjvm
         // directly), so the app jars are run on the build JDK. What matters is that these are
         // the jars from the installer, not the development classpath.
-        val jars = File(image, "lib/app").listFiles { file -> file.extension == "jar" }
-            ?.sortedBy { it.name }
-            .orEmpty()
-        require(jars.isNotEmpty()) { "No application jars under $image/lib/app" }
+        val jars = appDir.listFiles { file -> file.extension == "jar" }!!
+            .sortedBy { it.name }
 
         // ...and that the packaged runtime carries the JDK modules the app links against. A
         // jlink image only gets Compose's default module set, which has no java.net.http, so the
@@ -146,7 +159,7 @@ tasks.register<Exec>("verifyRuntime") {
         // jpackage leaves skiko's native library next to the jars; the launcher normally finds
         // it there. Name the directory explicitly so the smoke run does not depend on
         // java.library.path guessing right.
-        val nativeDir = File(image, "lib/app").absolutePath
+        val nativeDir = appDir.absolutePath
         commandLine(
             launcher.get().executablePath.asFile.absolutePath,
             "-Djava.awt.headless=true",
