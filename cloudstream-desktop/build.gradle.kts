@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "app.cloudstream.desktop"
-version = "1.3.0"
+version = "1.3.1"
 
 kotlin {
     jvmToolchain(21)
@@ -97,7 +97,14 @@ compose.desktop {
             // .deb is produced on Linux, .dmg on macOS.
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "CloudStream"
-            packageVersion = "1.3.0"
+            packageVersion = "1.3.1"
+
+            // jpackage builds the bundled runtime with jlink, whose default module set has no
+            // java.net.http — the installer then died at launch with
+            // NoClassDefFoundError: java/net/http/HttpClient, because the HTTP client, the
+            // downloader, subtitles and DNS-over-HTTPS all use it. Extensions add further
+            // reflective JDK use, so ship every module instead of guessing per release.
+            includeAllModules = true
             description = "CloudStream Desktop"
             vendor = "CloudStream Desktop"
             copyright = "GPL-3.0-or-later"
