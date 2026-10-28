@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "app.cloudstream.desktop"
-version = "1.3.1"
+version = "1.3.2"
 
 kotlin {
     jvmToolchain(21)
@@ -33,8 +33,15 @@ dependencies {
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.3")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation(compose.desktop.currentOs)
-    implementation("org.jetbrains.compose.material3:material3:1.7.3")
-    // Rail and settings icons matching the original app's UI.
+    // Must match the Compose Multiplatform version above: material3 1.7.3 was built against
+    // foundation-layout 1.7.3, and Gradle upgrades foundation-layout to 1.12.0 in the packaged
+    // app. The old material3 then called WindowInsets$_notMobileKt.getSystemBars, which no
+    // longer exists in 1.12.0, and the installer died at launch with a NoSuchMethodError.
+    // 1.12.0-alpha03 is the alpha in the 1.12 line and what upstream's app pins itself.
+    implementation("org.jetbrains.compose.material3:material3:1.12.0-alpha03")
+    // Rail and settings icons matching the original app's UI. 1.7.3 is the last published
+    // build of this artifact; it only holds ImageVector data, so it does not touch the
+    // foundation APIs that changed.
     implementation("org.jetbrains.compose.material:material-icons-extended:1.7.3")
     // Poster artwork on the home/search grids, like the Android app's poster cards.
     implementation("io.coil-kt.coil3:coil-compose:3.2.0")
@@ -83,6 +90,78 @@ tasks.register<JavaExec>("verifyLegacy") {
     classpath = sourceSets["test"].runtimeClasspath
 }
 
+/**
+ * Renders one headless Compose frame on the *packaged* distributable: its own jlink runtime and
+ * exactly the jars that ship in the installer.
+ *
+ * Two releases shipped installers that died before showing a window — one missing the
+ * java.net.http JDK module, one with material3 built against an older foundation-layout than
+ * Gradle resolves. Compiling and unit tests both passed, because the development classpath is
+ * not the packaged one. This runs the same Material3 composition the app starts with, so a
+ * linkage failure fails the build instead of the user's launch.
+ */
+tasks.register<Exec>("verifyRuntime") {
+    group = "verification"
+    description = "Render a headless Compose frame from the packaged app image"
+    dependsOn("createDistributable", "testClasses")
+
+    val imageDir = layout.buildDirectory.dir("compose/binaries/main/app/CloudStream")
+    val testClassesDir = layout.buildDirectory.dir("classes/kotlin/test")
+    val launcher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+
+    doFirst {
+        val image = imageDir.get().asFile
+        val runtime = File(image, "lib/runtime")
+
+        // Compose ships the jlink image without a java executable (the launcher loads libjvm
+        // directly), so the app jars are run on the build JDK. What matters is that these are
+        // the jars from the installer, not the development classpath.
+        val jars = File(image, "lib/app").listFiles { file -> file.extension == "jar" }
+            ?.sortedBy { it.name }
+            .orEmpty()
+        require(jars.isNotEmpty()) { "No application jars under $image/lib/app" }
+
+        // ...and that the packaged runtime carries the JDK modules the app links against. A
+        // jlink image only gets Compose's default module set, which has no java.net.http, so the
+        // 1.3.0 installer died at launch with NoClassDefFoundError: java/net/http/HttpClient.
+        val release = File(runtime, "release")
+        require(release.isFile) { "Packaged runtime not found at $runtime" }
+        val modules = release.readText().lineSequence()
+            .firstOrNull { it.startsWith("MODULES=") }
+            ?.removePrefix("MODULES=")
+            ?.split(' ')
+            ?.toSet()
+            .orEmpty()
+        val required = listOf("java.net.http", "java.desktop", "java.scripting", "jdk.unsupported")
+        val missing = required.filterNot { it in modules }
+        require(missing.isEmpty()) {
+            "Packaged runtime is missing $missing; nativeDistributions must ship those modules"
+        }
+
+        val classpath = (listOf(testClassesDir.get().asFile) + jars)
+            .joinToString(File.pathSeparator) { it.absolutePath }
+
+        // jpackage leaves skiko's native library next to the jars; the launcher normally finds
+        // it there. Name the directory explicitly so the smoke run does not depend on
+        // java.library.path guessing right.
+        val nativeDir = File(image, "lib/app").absolutePath
+        commandLine(
+            launcher.get().executablePath.asFile.absolutePath,
+            "-Djava.awt.headless=true",
+            "-Dskiko.renderApi=SOFTWARE",
+            "-Dskiko.library.path=$nativeDir",
+            "-Djava.library.path=$nativeDir",
+            "--enable-native-access=ALL-UNNAMED",
+            "-cp",
+            classpath,
+            "app.cloudstream.desktop.HeadlessRenderKt",
+        )
+        println("Rendering package smoke frame: ${jars.size} installer jars, ${modules.size} JDK modules")
+    }
+}
+
 // Skiko (Compose's renderer) needs native access on modern JDKs.
 tasks.withType<JavaExec> {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
@@ -97,7 +176,7 @@ compose.desktop {
             // .deb is produced on Linux, .dmg on macOS.
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "CloudStream"
-            packageVersion = "1.3.1"
+            packageVersion = "1.3.2"
 
             // jpackage builds the bundled runtime with jlink, whose default module set has no
             // java.net.http — the installer then died at launch with
