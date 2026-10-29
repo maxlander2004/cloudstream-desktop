@@ -67,6 +67,26 @@ class Settings {
         get() = get("player.vlcPath", "")
         set(value) = set("player.vlcPath", value.trim())
 
+    /** Subtitle search source; "off" until an API key is entered. */
+    var subtitleProvider: String
+        get() = get("player.subtitleProvider", "off")
+        set(value) = set("player.subtitleProvider", value)
+
+    /** SubDL API key, created on the user's own SubDL account. */
+    var subdlApiKey: String
+        get() = get("player.subdlApiKey", "")
+        set(value) = set("player.subdlApiKey", value.trim())
+
+    /** Language subtitle search asks for first. */
+    var subtitleSearchLanguage: String
+        get() = get("player.subtitleSearchLanguage", "en")
+        set(value) = set("player.subtitleSearchLanguage", value.trim().lowercase())
+
+    /** Push watched episodes and bookmarks to the linked AniList/MyAnimeList account. */
+    var trackSync: Boolean
+        get() = getBool("accounts.sync", true)
+        set(value) = set("accounts.sync", value.toString())
+
     // ---------------------------------------------------------------- Repositories
     /**
      * Repositories listed on the Extensions screen, the official one by default. Shortcodes

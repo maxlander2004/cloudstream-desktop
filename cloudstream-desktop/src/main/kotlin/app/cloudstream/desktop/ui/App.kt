@@ -805,7 +805,9 @@ fun App() {
                         )
 
                         SettingsPage.Accounts -> AccountsSettings(
+                            settings = settings,
                             onBack = { settingsPage = SettingsPage.Root },
+                            onStatus = { status = it },
                         )
                     }
                 }

@@ -57,6 +57,35 @@ object Http {
     }
 
     /**
+     * A request with a method, a body and headers — what the list APIs and the subtitle search
+     * need. Kept here so every call still goes through the clone-site and proxy rewrites.
+     */
+    suspend fun send(
+        method: String,
+        url: String,
+        body: String? = null,
+        contentType: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        timeoutSeconds: Long = 30,
+    ): String = withContext(Dispatchers.IO) {
+        val builder = HttpRequest.newBuilder(URI.create(rewrite(url)))
+            .timeout(Duration.ofSeconds(timeoutSeconds))
+            .header("User-Agent", UA)
+            .method(
+                method,
+                body?.let { HttpRequest.BodyPublishers.ofString(it) }
+                    ?: HttpRequest.BodyPublishers.noBody(),
+            )
+        contentType?.let { builder.header("Content-Type", it) }
+        headers.forEach { (key, value) -> builder.header(key, value) }
+        val response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+        check(response.statusCode() in 200..299) {
+            "HTTP ${response.statusCode()}: ${response.body().take(200)}"
+        }
+        response.body()
+    }
+
+    /**
      * Where a short link points, without following it — the redirect lookup upstream uses to
      * resolve repository shortcodes such as `megarepo`. Null when the link does not redirect.
      */

@@ -66,6 +66,7 @@ import app.cloudstream.desktop.api.StreamLink
 import app.cloudstream.desktop.core.Bookmark
 import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.Library
+import app.cloudstream.desktop.core.Tracking
 import app.cloudstream.desktop.core.PlaybackSession
 import app.cloudstream.desktop.core.Player
 import app.cloudstream.desktop.core.ResumePolicy
@@ -327,15 +328,16 @@ fun ResultScreen(
                 Spacer(Modifier.width(4.dp))
                 IconButton(
                     onClick = {
-                        bookmarked = Library.toggleBookmark(
-                            Bookmark(
-                                url = item.url,
-                                apiName = item.apiName,
-                                title = item.title,
-                                posterUrl = item.posterUrl,
-                                type = item.type.name,
-                            ),
+                        val bookmark = Bookmark(
+                            url = item.url,
+                            apiName = item.apiName,
+                            title = item.title,
+                            posterUrl = item.posterUrl,
+                            type = item.type.name,
                         )
+                        bookmarked = Library.toggleBookmark(bookmark)
+                        // Mirrors the bookmark onto the linked list, when one is signed in.
+                        Tracking.onBookmarkedAsync(bookmark, bookmarked)
                         onStatus(if (bookmarked) "Bookmarked ${item.title}" else "Removed bookmark")
                     },
                 ) {

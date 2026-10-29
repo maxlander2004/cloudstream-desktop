@@ -41,6 +41,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,11 +56,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.api.ItemType
+import app.cloudstream.desktop.core.Accounts
 import app.cloudstream.desktop.core.AppUpdates
 import app.cloudstream.desktop.core.Backup
 import app.cloudstream.desktop.core.Doh
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.Settings
+import app.cloudstream.desktop.core.SubtitleSearch
+import app.cloudstream.desktop.core.TrackingProvider
 import app.cloudstream.desktop.core.UpdateCheck
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -404,6 +408,55 @@ fun PlayerSettings(
     )
     Text(
         "Subtitle files saved next to a download are picked up automatically.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
+    )
+
+    SectionLabel("Subtitle search")
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        FilterChip(
+            selected = settings.subtitleProvider != SubtitleSearch.PROVIDER_SUBDL,
+            onClick = { settings.subtitleProvider = "off" },
+            label = { Text("Off") },
+        )
+        Spacer(Modifier.width(8.dp))
+        FilterChip(
+            selected = settings.subtitleProvider == SubtitleSearch.PROVIDER_SUBDL,
+            onClick = { settings.subtitleProvider = SubtitleSearch.PROVIDER_SUBDL },
+            label = { Text("SubDL") },
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = settings.subdlApiKey,
+        onValueChange = { settings.subdlApiKey = it },
+        label = { Text("SubDL API key") },
+        placeholder = { Text("From subdl.com/panel/api") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    OutlinedTextField(
+        value = settings.subtitleSearchLanguage,
+        onValueChange = { settings.subtitleSearchLanguage = it },
+        label = { Text("Subtitle search language") },
+        placeholder = { Text("en") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Text(
+        "Subtitle search needs a free SubDL API key; the player's subtitle menu then lists " +
+            "what the service has for the episode.",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
         modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
@@ -861,13 +914,145 @@ internal fun InstalledExtensionsList(
 
 @Composable
 fun AccountsSettings(
+    settings: Settings,
     onBack: () -> Unit,
+    onStatus: (String) -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    val changes by Accounts.changes.collectAsState()
+    var linking by remember { mutableStateOf<String?>(null) }
+    var clientIds by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
     SectionHeader("Accounts and Security", onBack)
 
     Text(
-        "Account and security settings are coming soon.",
+        "Link an AniList or MyAnimeList account to keep bookmarks and watch progress on your " +
+            "list. Signing in opens your browser; the token is stored only on this computer.",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 13.sp,
+    )
+    Spacer(Modifier.height(10.dp))
+
+    SwitchRow(
+        title = "Sync with linked accounts",
+        subtitle = "Push watched episodes and bookmarks to your lists",
+        checked = settings.trackSync,
+        onCheckedChange = { settings.trackSync = it },
+    )
+
+    SectionLabel("Lists")
+
+    TrackingProvider.entries.forEach { provider ->
+        val account = remember(changes, provider) { Accounts.get(provider) }
+        val busy = linking == provider.id
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
+            Icon(
+                Icons.Outlined.AccountCircle,
+                contentDescription = null,
+                tint = if (account != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    provider.label,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    account?.let { "Signed in as ${it.username.ifBlank { "account" }}" } ?: "Not linked",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            } else if (account != null) {
+                Switch(
+                    checked = account.enabled,
+                    onCheckedChange = { enabled ->
+                        Accounts.setEnabled(provider, enabled)
+                        onStatus(if (enabled) "${provider.label} syncing on" else "${provider.label} syncing off")
+                    },
+                    colors = SwitchDefaults.colors(checkedThumbColor = MaterialTheme.colorScheme.primary),
+                )
+                Spacer(Modifier.width(6.dp))
+                TextButton(
+                    onClick = {
+                        Accounts.remove(provider)
+                        onStatus("Signed out of ${provider.label}")
+                    },
+                ) { Text("Sign out") }
+            }
+        }
+
+        if (account == null) {
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = clientIds[provider.id].orEmpty(),
+                onValueChange = { value -> clientIds = clientIds + (provider.id to value) },
+                label = { Text("${provider.label} client ID") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(vertical = 4.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                provider.description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = {
+                        val clientId = clientIds[provider.id].orEmpty().trim()
+                        if (clientId.isEmpty()) {
+                            onStatus("Enter your ${provider.label} client ID first")
+                            return@Button
+                        }
+                        scope.launch {
+                            linking = provider.id
+                            onStatus("Waiting for ${provider.label} sign-in…")
+                            val result = Accounts.signIn(provider, clientId)
+                            linking = null
+                            onStatus(
+                                result.fold(
+                                    onSuccess = { "Signed in to ${provider.label} as ${it.username}" },
+                                    onFailure = { "${provider.label} sign-in failed: ${it.message}" },
+                                ),
+                            )
+                        }
+                    },
+                    enabled = linking == null,
+                ) { Text("Sign in") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = {
+                        runCatching { Desktop.getDesktop().browse(java.net.URI(provider.registerUrl)) }
+                        onStatus("Opened ${provider.label} app settings in your browser")
+                    },
+                ) { Text("Create an app") }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+
+    SectionLabel("Security")
+    Text(
+        "Access tokens are kept in accounts.json in your CloudStream folder and are sent only " +
+            "to the list you signed in to. Signing out deletes the token from this computer.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
     )
 }

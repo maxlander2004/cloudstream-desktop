@@ -8,6 +8,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -21,6 +24,7 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.Subtitles
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -28,6 +32,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,8 +59,11 @@ import app.cloudstream.desktop.core.Player
 import app.cloudstream.desktop.core.PlaybackSession
 import app.cloudstream.desktop.core.ResumePolicy
 import app.cloudstream.desktop.core.Settings
+import app.cloudstream.desktop.core.SubtitleHit
 import app.cloudstream.desktop.core.SubtitleOption
+import app.cloudstream.desktop.core.SubtitleSearch
 import app.cloudstream.desktop.core.Subtitles
+import app.cloudstream.desktop.core.Tracking
 import app.cloudstream.desktop.core.WatchProgress
 import app.cloudstream.desktop.core.WatchRecord
 import kotlinx.coroutines.delay
@@ -116,6 +124,7 @@ fun PlayerScreen(
     var subtitleOptions by remember(session) { mutableStateOf<List<SubtitleOption>>(emptyList()) }
     var subtitle by remember { mutableStateOf<SubtitleOption?>(null) }
     var subtitleMenuOpen by remember { mutableStateOf(false) }
+    var subtitleSearchOpen by remember { mutableStateOf(false) }
     var embeddedTracks by remember { mutableStateOf<List<TrackDescription>>(emptyList()) }
 
     val episode = session.episodes.getOrNull(index)
@@ -151,6 +160,20 @@ fun PlayerScreen(
                 episode = episode?.episode,
             ),
         )
+        // The same event feeds the linked AniList/MyAnimeList list, when one is signed in.
+        // A movie has no episode number, so it is what completes a list entry.
+        if (settings.trackSync) {
+            scope.launch {
+                runCatching {
+                    Tracking.onEpisodeWatched(
+                        title = session.title,
+                        season = episode?.season,
+                        episode = episode?.episode,
+                        finished = episode?.episode == null,
+                    )
+                }
+            }
+        }
     }
 
     /** Saves where playback is, so the detail screen can resume from here. */
@@ -557,6 +580,13 @@ fun PlayerScreen(
                                 }
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text("Search subtitles online…") },
+                            onClick = {
+                                subtitleMenuOpen = false
+                                subtitleSearchOpen = true
+                            },
+                        )
                     }
                 }
                 IconButton(
@@ -583,4 +613,150 @@ fun PlayerScreen(
             }
         }
     }
+
+    if (subtitleSearchOpen) {
+        SubtitleSearchDialog(
+            settings = settings,
+            initialQuery = subtitleQueryFor(session.title, episode),
+            onPick = { picked ->
+                subtitleOptions = (listOf(picked) + subtitleOptions).distinctBy { it.key }
+                subtitle = picked
+                onStatus("Subtitles: ${picked.label}")
+            },
+            onDismiss = { subtitleSearchOpen = false },
+            onStatus = onStatus,
+        )
+    }
+}
+
+/** `Show S02E05`-style query, so a series search does not have to be narrowed by hand. */
+internal fun subtitleQueryFor(title: String, episode: app.cloudstream.desktop.core.SessionEpisode?): String {
+    val season = episode?.season?.takeIf { it > 0 }
+    val number = episode?.episode?.takeIf { it > 0 }
+    return if (season != null && number != null) {
+        "$title S%02dE%02d".format(season, number)
+    } else {
+        title
+    }
+}
+
+/**
+ * The original's *Search subtitles* action. Only SubDL is offered, because it is the one
+ * provider whose public API accepts a plain user key with no server-side secret.
+ */
+@Composable
+private fun SubtitleSearchDialog(
+    settings: Settings,
+    initialQuery: String,
+    onPick: (SubtitleOption) -> Unit,
+    onDismiss: () -> Unit,
+    onStatus: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf(initialQuery) }
+    var language by remember { mutableStateOf(settings.subtitleSearchLanguage) }
+    var results by remember { mutableStateOf<List<SubtitleHit>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val apiKey = settings.subdlApiKey
+
+    fun runSearch() {
+        val text = query.trim()
+        if (text.isEmpty()) return
+        searching = true
+        message = null
+        scope.launch {
+            val found = runCatching {
+                SubtitleSearch.search(text, language, apiKey)
+            }.getOrElse {
+                message = "Search failed: ${it.message}"
+                emptyList()
+            }
+            results = found
+            searching = false
+            if (found.isEmpty() && message == null) message = "No subtitles found for \"$text\""
+        }
+    }
+
+    LaunchedEffect(Unit) { if (apiKey.isNotBlank()) runSearch() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Search subtitles") },
+        text = {
+            Column {
+                if (apiKey.isBlank()) {
+                    Text(
+                        "Add a free SubDL API key in Settings → Player to search subtitles online.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = { Text("Title") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = language,
+                        onValueChange = { language = it },
+                        label = { Text("Language") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = { runSearch() }, enabled = !searching) {
+                        Text(if (searching) "Searching…" else "Search")
+                    }
+                    message?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(Modifier.heightIn(max = 220.dp)) {
+                        items(results) { hit ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(hit.label, fontSize = 13.sp)
+                                        if (hit.title.isNotBlank() && hit.title != hit.label) {
+                                            Text(
+                                                hit.title,
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    scope.launch {
+                                        onStatus("Downloading subtitles…")
+                                        val file = SubtitleSearch.download(hit)
+                                        if (file == null) {
+                                            onStatus("Could not download that subtitle")
+                                        } else {
+                                            onPick(
+                                                SubtitleOption(
+                                                    label = hit.label,
+                                                    language = hit.language.lowercase().take(2),
+                                                    file = file,
+                                                ),
+                                            )
+                                            onDismiss()
+                                        }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
