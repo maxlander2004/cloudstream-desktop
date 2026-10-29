@@ -2,6 +2,10 @@ package app.cloudstream.desktop.core.legacy
 
 import com.googlecode.d2j.dex.Dex2jar
 import com.googlecode.d2j.reader.DexFileReader
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.commons.ClassRemapper
+import org.objectweb.asm.commons.Remapper
 import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -9,6 +13,7 @@ import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
@@ -24,13 +29,19 @@ import java.util.zip.ZipOutputStream
  * changes, so it is done once per installed file.
  */
 object DexTranslator {
+    /**
+     * Bumped whenever the translation itself changes, so cached jars from an older build are
+     * not reused. v2 adds [restoreHyphenatedNames].
+     */
+    private const val CACHE_VERSION = 2
+
     fun cacheDir(): Path =
         Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "dex-cache")
 
     fun translate(archive: Path): Path {
         val raw = Files.readAllBytes(archive)
         val key = sha256(raw)
-        val target = cacheDir().resolve("$key.jar")
+        val target = cacheDir().resolve("v$CACHE_VERSION-$key.jar")
         if (Files.isRegularFile(target) && Files.size(target) > 0L) return target
 
         Files.createDirectories(cacheDir())
@@ -53,6 +64,7 @@ object DexTranslator {
                 merge(parts, merged)
             }
 
+            restoreHyphenatedNames(merged)
             Files.move(merged, target, StandardCopyOption.REPLACE_EXISTING)
         } finally {
             runCatching { staging.toFile().deleteRecursively() }
@@ -85,6 +97,48 @@ object DexTranslator {
         return found.sortedBy { (name, _) ->
             name.removePrefix("classes").removeSuffix(".dex").toIntOrNull() ?: 1
         }.map { it.second }
+    }
+
+    /**
+     * Restores the hyphenated names Kotlin uses for value-class members.
+     *
+     * `kotlin.Result` is a value class, so its members are called `constructor-impl`,
+     * `isFailure-impl`, `exceptionOrNull-impl` … in the Kotlin runtime. dex2jar sanitises the
+     * hyphen to an underscore while translating, which turns every extension that uses
+     * `runCatching` into a `NoSuchMethodError` at runtime. Renaming the references back to
+     * their real names is enough: the descriptors are unchanged, and only methods ending in
+     * `_impl` are touched, so ordinary underscore names are left alone.
+     */
+    private fun restoreHyphenatedNames(jar: Path) {
+        val rewritten = jar.resolveSibling("${jar.fileName}.rewritten")
+        ZipFile(jar.toFile()).use { zip ->
+            ZipOutputStream(Files.newOutputStream(rewritten)).use { out ->
+                for (entry in zip.entries()) {
+                    val bytes = zip.getInputStream(entry).readBytes()
+                    val fixed = if (entry.name.endsWith(".class")) fixClass(bytes) else bytes
+                    out.putNextEntry(ZipEntry(entry.name))
+                    out.write(fixed)
+                    out.closeEntry()
+                }
+            }
+        }
+        Files.move(rewritten, jar, StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    /** Exposed for the test that checks the `_impl` rename. */
+    internal fun restoreValueClassNames(bytes: ByteArray): ByteArray = fixClass(bytes)
+
+    private fun fixClass(bytes: ByteArray): ByteArray = runCatching {
+        val writer = ClassWriter(0)
+        ClassReader(bytes).accept(ClassRemapper(writer, ValueClassNameRemapper), 0)
+        writer.toByteArray()
+    }.getOrDefault(bytes)
+
+    private object ValueClassNameRemapper : Remapper() {
+        private const val SUFFIX = "_impl"
+
+        override fun mapMethodName(owner: String, name: String, descriptor: String): String =
+            if (name.endsWith(SUFFIX)) name.dropLast(SUFFIX.length) + "-impl" else name
     }
 
     private fun merge(parts: List<Path>, target: Path) {

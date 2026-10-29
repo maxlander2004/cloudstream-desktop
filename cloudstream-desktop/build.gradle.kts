@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "app.cloudstream.desktop"
-version = "1.3.3"
+version = "1.3.4"
 
 kotlin {
     jvmToolchain(21)
@@ -23,6 +23,11 @@ dependencies {
 
     // Translates an extension's classes.dex into JVM bytecode.
     implementation("de.femtopedia.dex2jar:dex-translator:2.4.38")
+
+    // Rewrites the translated classes: dex2jar renames Kotlin's hyphenated `-impl` methods to
+    // `_impl`, which does not exist in the Kotlin runtime extensions are linked against.
+    implementation("org.ow2.asm:asm:9.10.1")
+    implementation("org.ow2.asm:asm-commons:9.10.1")
 
     // Kotlin Compose 1.12 requires the Compose Base plugin to be applied to the root project
     // and activated for the JVM target; this activation isn't automatic in 1.12, so add it here.
@@ -189,7 +194,7 @@ compose.desktop {
             // .deb is produced on Linux, .dmg on macOS.
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "CloudStream"
-            packageVersion = "1.3.3"
+            packageVersion = "1.3.4"
 
             // jpackage builds the bundled runtime with jlink, whose default module set has no
             // java.net.http — the installer then died at launch with
