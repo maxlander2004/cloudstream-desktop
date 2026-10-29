@@ -11,6 +11,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
+import java.util.Comparator
+import java.util.zip.ZipFile
 
 @Serializable
 data class PluginManifest(
@@ -35,6 +37,20 @@ data class ExtensionLoadResult(
 )
 
 /**
+ * One archive in the extensions folder, whether or not it is currently loaded.
+ *
+ * This is what the Extensions screen lists, so a disabled extension still shows its name and
+ * version instead of looking uninstalled.
+ */
+data class InstalledArchive(
+    val file: Path,
+    val name: String,
+    val version: Int,
+    val enabled: Boolean,
+    val legacy: Boolean,
+)
+
+/**
  * Loads extensions from the `~/.cloudstream-desktop/extensions` folder.
  *
  * Two kinds are supported and they share one code path in the UI:
@@ -47,6 +63,9 @@ data class ExtensionLoadResult(
 object ExtensionHost {
     private val json = Json { ignoreUnknownKeys = true }
 
+    /** Loaders of the loaded `.jar` extensions, closed on reload so the files unlock. */
+    private val jarLoaders = mutableListOf<URLClassLoader>()
+
     fun extensionsDir(): Path =
         Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "extensions")
 
@@ -54,6 +73,32 @@ object ExtensionHost {
         val dir = extensionsDir()
         runCatching { Files.createDirectories(dir) }
         return dir
+    }
+
+    /**
+     * `~/.cloudstream-desktop/plugins.disabled`, one file name per line.
+     *
+     * The Android app keeps the same information in its plugin data and treats a disabled
+     * plugin as installed-but-not-loaded; a plain list of names is the desktop equivalent.
+     */
+    private fun disabledFile(): Path =
+        Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "plugins.disabled")
+
+    fun disabled(): Set<String> = runCatching {
+        Files.readAllLines(disabledFile()).map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    }.getOrDefault(emptySet())
+
+    /** Enables or disables an extension; the caller reloads afterwards. */
+    fun setEnabled(file: Path, enabled: Boolean) {
+        val name = file.fileName.toString()
+        val current = disabled()
+        val next = if (enabled) current - name else current + name
+        if (next == current) return
+
+        runCatching {
+            Files.createDirectories(disabledFile().parent)
+            Files.write(disabledFile(), next.sorted())
+        }
     }
 
     /**
@@ -68,6 +113,8 @@ object ExtensionHost {
 
         val target = ensureExtensionsDir().resolve(source.fileName)
         Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+        // Installing is also how an extension gets re-enabled.
+        setEnabled(target, true)
 
         loadAll().let { result ->
             result.loaded.firstOrNull { it.file == target }
@@ -81,15 +128,95 @@ object ExtensionHost {
         }
     }
 
+    /**
+     * Installs an extension from a url, the way the Android app installs from a `.cs3` link.
+     * The archive keeps the name the link points at, so a later update replaces it in place.
+     */
+    suspend fun installFromUrl(url: String): Result<LoadedExtension> = runCatching {
+        val trimmed = url.trim()
+        require(trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            "$trimmed is not an http(s) url"
+        }
+
+        val remote = trimmed.substringAfterLast('/').substringBefore('?').substringBefore('#')
+            .ifBlank { "extension.cs3" }
+        val fileName = if (isSupported(Paths.get(remote))) remote else "$remote.cs3"
+
+        val dir = Files.createTempDirectory("cloudstream-extension")
+        try {
+            val download = dir.resolve(fileName)
+            Files.write(download, Http.getBytes(trimmed))
+            install(download).getOrThrow()
+        } finally {
+            runCatching {
+                Files.walk(dir).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Removes an extension, its providers and its enabled/disabled entry — the desktop
+     * equivalent of `PluginManager.deletePlugin`.
+     */
+    fun uninstall(file: Path): Result<Unit> = runCatching<Unit> {
+        require(Files.isRegularFile(file)) { "${file.fileName} is not installed" }
+
+        // Providers and class loaders go first: an open jar cannot be deleted on Windows, and
+        // a surviving provider would keep the removed extension reachable.
+        release()
+        Files.deleteIfExists(file)
+        setEnabled(file, true)
+        loadAll()
+    }
+
     fun isSupported(file: Path): Boolean =
         LegacyExtensions.looksLikeLegacy(file) ||
             file.fileName.toString().endsWith(".jar", ignoreCase = true)
 
+    /**
+     * Every archive in the extensions folder with the name and version from its manifest.
+     * Nothing is executed, so this also describes disabled and currently broken extensions.
+     */
+    fun installed(): List<InstalledArchive> {
+        val dir = ensureExtensionsDir()
+        val disabled = disabled()
+
+        val archives = runCatching {
+            Files.list(dir).use { stream ->
+                stream.filter { Files.isRegularFile(it) && isSupported(it) }.sorted().toList()
+            }
+        }.getOrDefault(emptyList())
+
+        return archives.mapNotNull { file ->
+            val legacy = LegacyExtensions.looksLikeLegacy(file)
+            val manifest = runCatching { readManifest(file) }.getOrNull() ?: return@mapNotNull null
+            InstalledArchive(
+                file = file,
+                name = manifest.name ?: file.fileName.toString(),
+                version = manifest.version ?: 0,
+                enabled = file.fileName.toString() !in disabled,
+                legacy = legacy,
+            )
+        }
+    }
+
+    private fun readManifest(file: Path): PluginManifest =
+        ZipFile(file.toFile()).use { zip ->
+            val entry = zip.getEntry("manifest.json")
+                ?: error("no manifest.json inside ${file.fileName}")
+            json.decodeFromString<PluginManifest>(
+                zip.getInputStream(entry).use { it.readBytes().decodeToString() },
+            )
+        }
+
     fun loadAll(): ExtensionLoadResult {
         // Providers live in a process-wide registry; drop the previous set first.
-        LegacyExtensions.unloadAll()
+        release()
 
         val dir = ensureExtensionsDir()
+        val disabled = disabled()
         val loaded = mutableListOf<LoadedExtension>()
         val errors = mutableListOf<String>()
 
@@ -104,6 +231,7 @@ object ExtensionHost {
         }
 
         for (archive in archives) {
+            if (archive.fileName.toString() in disabled) continue
             try {
                 if (LegacyExtensions.looksLikeLegacy(archive)) {
                     loaded += loadLegacy(archive)
@@ -119,6 +247,15 @@ object ExtensionHost {
         return ExtensionLoadResult(loaded, errors)
     }
 
+    /** Unregisters every provider and closes every archive, so files can be replaced. */
+    private fun release() {
+        LegacyExtensions.unloadAll()
+        synchronized(jarLoaders) {
+            jarLoaders.forEach { runCatching { it.close() } }
+            jarLoaders.clear()
+        }
+    }
+
     private fun loadNative(jar: Path): LoadedExtension {
         val loader = URLClassLoader(arrayOf(jar.toUri().toURL()), Catalog::class.java.classLoader)
         return try {
@@ -131,6 +268,7 @@ object ExtensionHost {
                 .newInstance() as? Catalog
                 ?: error("${manifest.pluginClassName} does not implement Catalog")
 
+            synchronized(jarLoaders) { jarLoaders += loader }
             LoadedExtension(manifest, instance, jar)
         } catch (t: Throwable) {
             // The loader opens the archive to search it. Leaving it open after a failed load

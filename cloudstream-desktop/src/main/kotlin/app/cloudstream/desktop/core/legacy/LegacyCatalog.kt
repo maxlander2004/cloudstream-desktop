@@ -77,7 +77,9 @@ class LegacyCatalog(
                     CatalogItem(
                         title = item.name.ifBlank { item.url },
                         url = item.url,
-                        subtitle = item.apiName.ifBlank { null },
+                        // The home card in `home_result_grid.xml` has no provider label; the
+                        // original only shows the reading's own episode text there.
+                        subtitle = null,
                         posterUrl = item.posterUrl,
                         type = itemTypeFor(item.type),
                     )

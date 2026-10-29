@@ -64,7 +64,8 @@ internal fun PosterCell(
             Modifier.fillMaxWidth()
                 // Upstream's poster aspect ratio, 114 × 180.
                 .aspectRatio(114f / 180f)
-                .clip(RoundedCornerShape(6.dp))
+                // Upstream's rounded_image_radius is 10dp.
+                .clip(RoundedCornerShape(10.dp))
                 .background(MaterialTheme.colorScheme.surface),
         ) {
             if (item.posterUrl != null) {
@@ -88,18 +89,33 @@ internal fun PosterCell(
                             ),
                         ),
                 )
-                Text(
-                    item.title,
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
+                // Upstream stacks the episode label above the title inside the poster
+                // (`episode_text` over `imageText`), both centered on the bottom shadow.
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .padding(horizontal = 5.dp, vertical = 5.dp),
-                )
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    item.subtitle?.takeIf { it.isNotBlank() }?.let { episode ->
+                        Text(
+                            episode,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                        )
+                    }
+                    Text(
+                        item.title,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                    )
+                }
             }
         }
         if (titleUnder) {
@@ -112,22 +128,15 @@ internal fun PosterCell(
                 maxLines = 2,
             )
         }
-        // Upstream shows the episode/quality label under the card, e.g. "S1E4".
-        item.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
-            if (titleUnder) {
+        // With titles below the poster the episode label sits below the title; otherwise it
+        // is drawn inside the artwork above the title, where upstream puts it.
+        if (titleUnder) {
+            item.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
                 Text(
                     subtitle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                     maxLines = 1,
-                )
-            } else {
-                Text(
-                    subtitle,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 2.dp),
                 )
             }
         }
@@ -224,7 +233,8 @@ internal fun PosterRailRow(
     titleUnder: Boolean,
     onOpen: (CatalogItem) -> Unit,
 ) {
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    // Upstream's rail uses a 5dp horizontal padding and 2dp card margins.
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         items(items, key = { "${it.url}:${it.title}:${it.subtitle.orEmpty()}" }) { item ->
             PosterCell(
                 item = item,
@@ -243,11 +253,12 @@ internal fun RailHeader(name: String) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // Upstream's WatchHeaderText: 18sp, bold, with the arrow on the right.
         Text(
             name,
             color = MaterialTheme.colorScheme.onBackground,
-            fontWeight = FontWeight.Medium,
-            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            fontSize = 18.sp,
             modifier = Modifier.weight(1f),
         )
         Icon(

@@ -58,7 +58,11 @@ object LegacyExtensions {
         }
     }
 
-    private class Loaded(val plugin: BasePlugin, val providers: List<MainAPI>)
+    private class Loaded(
+        val plugin: BasePlugin,
+        val providers: List<MainAPI>,
+        val loader: ClassLoader,
+    )
 
     private val loaded = mutableListOf<Loaded>()
 
@@ -73,6 +77,9 @@ object LegacyExtensions {
             for (entry in loaded) {
                 runCatching { entry.plugin.beforeUnload() }
                 APIHolder.allProviders.removeAll(entry.providers)
+                // Release the translated archive too: on Windows an open jar cannot be
+                // deleted, which would break uninstall and in-place updates.
+                runCatching { (entry.loader as? URLClassLoader)?.close() }
             }
             loaded.clear()
         }
@@ -128,7 +135,7 @@ object LegacyExtensions {
             "${manifest.name ?: manifest.pluginClassName} loaded but registered no providers"
         }
 
-        synchronized(loaded) { loaded += Loaded(plugin, added) }
+        synchronized(loaded) { loaded += Loaded(plugin, added, loader) }
 
         return LegacyLoad(manifest, added, loader)
     }

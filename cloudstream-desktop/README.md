@@ -45,13 +45,12 @@ as artifacts, so a Windows machine is not strictly required.
 
 ## Extensions
 
-Three things can provide content:
+Two things can provide content, and neither is built in: like the Android app, a fresh
+install has no providers until an extension is added.
 
-1. **Built-in source** — "Public IPTV", which reads the open
-   [iptv-org](https://github.com/iptv-org/iptv) playlist. Works on a fresh install.
-2. **Original CloudStream extensions** — the `.cs` / `.cs3` archives from the official
+1. **Original CloudStream extensions** — the `.cs` / `.cs3` archives from the official
    [extension repository](https://github.com/recloudstream/extensions), used as-is. See below.
-3. **Desktop extensions** — `.jar` files written against this app's `Catalog` API.
+2. **Desktop extensions** — `.jar` files written against this app's `Catalog` API.
 
 ### Original CloudStream extensions
 
@@ -126,10 +125,17 @@ A download is verified against the repository's published SHA-256 and size befor
 down are still listed.
 
 Extensions → **Install file…** still accepts a manually picked `.cs3`, `.cs`, `.apk` or
-`.jar`, and dropping files into that folder and pressing **Reload** works too. The copy is
-only kept if it actually loads, so a broken archive is reported instead of piling up.
-Installed sources appear as chips on the Home screen, tagged `CloudStream` in the extensions
-list when they come from an original archive.
+`.jar`, **Install from URL…** takes a link to one, and dropping files into the extensions
+folder and pressing **Reload** works too. The copy is only kept if it actually loads, so a
+broken archive is reported instead of piling up. Installed sources appear as chips on the
+Home screen, tagged `CloudStream` in the extensions list when they come from an original
+archive.
+
+Installed extensions behave like the Android app's: the switch enables or disables one
+without deleting it (a disabled extension stays on disk and keeps its version, but registers
+no providers), the bin icon removes it outright, and **Update all** applies every newer
+version the repositories offer. An entry a repository marks as `Down` is installed disabled,
+which is how upstream treats a provider that has gone offline.
 
 ### Desktop (.jar) extensions
 
@@ -224,7 +230,6 @@ src/main/kotlin/app/cloudstream/desktop/
   core/legacy/LegacyExtensions.kt original .cs3/.cs/.apk plugin loader (BasePlugin + APIHolder)
   core/legacy/LegacyCatalog.kt    MainAPI provider -> desktop Catalog
   core/legacy/NewPipeDownloader.kt  NewPipe init the YouTube extractor requires
-  core/IptvSource.kt       built-in public IPTV source
   core/Http.kt             JDK HTTP client wrapper
   core/Player.kt           external player + settings
   ui/Theme.kt              upstream dark palette

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
@@ -70,6 +71,7 @@ import app.cloudstream.desktop.core.Player
 import app.cloudstream.desktop.core.ResumePolicy
 import app.cloudstream.desktop.core.SessionEpisode
 import app.cloudstream.desktop.core.Settings
+import app.cloudstream.desktop.core.bestDownloadLink
 import app.cloudstream.desktop.core.episodeLabelOf
 import app.cloudstream.desktop.core.sessionEpisodes
 import app.cloudstream.desktop.core.WatchRecord
@@ -193,32 +195,52 @@ fun ResultScreen(
         }
     }
 
-    /** Upstream's batch download: resolve and queue one link per episode of the season. */
-    fun downloadSeason(episodes: List<DesktopEpisode>) {
+    /**
+     * Upstream's batch download: resolve and queue one link per episode. [batchName] names the
+     * run ("Season 2", "All seasons") so Downloads can show it as one job rather than N rows.
+     */
+    fun downloadSeason(episodes: List<DesktopEpisode>, batchName: String) {
         val target = legacy
         if (target == null) {
             onStatus("This source cannot be batch downloaded")
             return
         }
         if (episodes.isEmpty()) return
+        val group = "${item.title} · $batchName"
         scope.launch {
             var queued = 0
+            var skipped = 0
+            // Pressing the button twice must not queue the same episode twice.
+            val alreadyQueued = DownloadManager.tasks.value.map { task -> task.url }.toSet()
             episodes.forEachIndexed { index, episode ->
-                onStatus("Resolving ${index + 1}/${episodes.size}…")
+                onStatus("Downloading ${index + 1}/${episodes.size}…")
                 val links = runCatching { target.streamsFor(episode.data, episode.name) }
                     .getOrNull()
                     .orEmpty()
-                val best = links.firstOrNull() ?: return@forEachIndexed
+                // A direct file wins over an HLS manifest: a saved playlist is not a video.
+                val best = links.bestDownloadLink()
+                if (best == null || best.url in alreadyQueued) {
+                    skipped++
+                    return@forEachIndexed
+                }
                 DownloadManager.add(
                     settings = settings,
                     title = "${item.title} · ${episodeLabel(episode)}",
                     url = best.url,
                     headers = best.headers,
                     subtitles = best.subtitles,
+                    group = group,
                 )
                 queued++
             }
-            onStatus(if (queued > 0) "Queued $queued episode(s) for download" else "No downloadable links found")
+            onStatus(
+                when {
+                    queued > 0 && skipped > 0 ->
+                        "Queued $queued episode(s); $skipped already queued or had no link"
+                    queued > 0 -> "Queued $queued episode(s) for $batchName — see Downloads"
+                    else -> "Nothing new to download in $batchName"
+                },
+            )
         }
     }
 
@@ -525,7 +547,7 @@ fun ResultScreen(
                     showDubbedSubbed = settings.displayDubbedSubbed,
                     sortDescending = sortDescending,
                     onToggleSort = { sortDescending = !sortDescending },
-                    onDownloadSeason = { episodes -> downloadSeason(episodes) },
+                    onDownloadSeason = { episodes, scope -> downloadSeason(episodes, scope) },
                     onDubStatusChange = { newDub ->
                         val seasonsForDub = episodeMap!![newDub] ?: emptyMap()
                         val firstSeason = seasonsForDub.keys.firstOrNull()
@@ -657,7 +679,7 @@ private fun EpisodeSelector(
     showDubbedSubbed: Boolean,
     sortDescending: Boolean,
     onToggleSort: () -> Unit,
-    onDownloadSeason: (List<DesktopEpisode>) -> Unit,
+    onDownloadSeason: (List<DesktopEpisode>, String) -> Unit,
     onDubStatusChange: (DubStatus) -> Unit,
     onSeasonChange: (Int) -> Unit,
     onEpisodeChange: (DesktopEpisode) -> Unit,
@@ -708,6 +730,11 @@ private fun EpisodeSelector(
         }
         Spacer(Modifier.height(8.dp))
 
+        // The season's own name, so a queued batch reads "Season 2" not "Season null".
+        val seasonName = item.seasonNames.firstOrNull { it.first == selection.season }?.second
+            ?: selection.season?.let { season -> "Season $season" }
+            ?: "This season"
+
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
                 "${episodes.size} episode(s)",
@@ -718,8 +745,31 @@ private fun EpisodeSelector(
             TextButton(onClick = onToggleSort) {
                 Text(if (sortDescending) "Newest first" else "Oldest first", fontSize = 12.sp)
             }
-            TextButton(enabled = episodes.isNotEmpty(), onClick = { onDownloadSeason(episodes) }) {
+            // Upstream's `result_batch_download_button`: queue the whole season at once.
+            Button(
+                onClick = { onDownloadSeason(episodes, seasonName) },
+                enabled = episodes.isNotEmpty(),
+            ) {
+                Icon(
+                    Icons.Outlined.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(6.dp))
                 Text("Download all", fontSize = 12.sp)
+            }
+            // Every season at once. Still limited to the dub status being viewed, so a show
+            // that ships both dubs does not queue the same episodes twice.
+            val everySeason = episodeMap[selection.dubStatus].orEmpty()
+                .toSortedMap()
+                .values
+                .flatMap { list -> list.sortedBy { it.episode ?: 0 } }
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(
+                onClick = { onDownloadSeason(everySeason, "All seasons") },
+                enabled = everySeason.isNotEmpty(),
+            ) {
+                Text("All seasons (${everySeason.size})", fontSize = 12.sp)
             }
         }
 

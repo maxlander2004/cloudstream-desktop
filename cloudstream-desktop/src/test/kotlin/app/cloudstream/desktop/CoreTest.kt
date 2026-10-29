@@ -7,8 +7,8 @@ import app.cloudstream.desktop.core.AppUpdates
 import app.cloudstream.desktop.core.Backup
 import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.ExtensionHost
-import app.cloudstream.desktop.core.IptvSource
 import app.cloudstream.desktop.core.Settings
+import app.cloudstream.desktop.core.bestDownloadLink
 import java.nio.file.Files
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
@@ -26,46 +26,6 @@ class FakeCatalog : Catalog {
 
     override suspend fun streams(item: CatalogItem): List<StreamLink> =
         listOf(StreamLink("direct", item.url))
-}
-
-class IptvSourceTest {
-    private val source = IptvSource()
-
-    @Test
-    fun `parses channels with logos and bare channels`() {
-        val playlist = """
-            #EXTM3U
-            #EXTINF:-1 tvg-id="One.uk" tvg-logo="https://example.com/one.png" group-title="News",One News
-            https://example.com/one.m3u8
-            #EXTINF:-1,Two Channel
-            https://example.com/two.m3u8
-        """.trimIndent()
-
-        val items = source.parse(playlist)
-
-        assertEquals(2, items.size)
-        assertEquals("One News", items[0].title)
-        assertEquals("https://example.com/one.m3u8", items[0].url)
-        assertEquals("https://example.com/one.png", items[0].posterUrl)
-        assertEquals("Two Channel", items[1].title)
-        assertNull(items[1].posterUrl)
-    }
-
-    @Test
-    fun `skips metadata lines and entries without a stream url`() {
-        val playlist = """
-            #EXTM3U
-            #EXTINF:-1,Orphan Without Url
-            #EXTINF:-1 tvg-logo="",Valid
-            https://example.com/valid.m3u8
-        """.trimIndent()
-
-        val items = source.parse(playlist)
-
-        assertEquals(1, items.size)
-        assertEquals("Valid", items[0].title)
-        assertNull(items[0].posterUrl)
-    }
 }
 
 class ExtensionHostTest {
@@ -158,6 +118,67 @@ class ExtensionHostTest {
                 result.exceptionOrNull()!!.message!!.contains("classes.dex"),
                 result.exceptionOrNull()!!.message,
             )
+        }
+    }
+
+    @Test
+    fun `describes an installed archive without loading it`() {
+        withTempHome {
+            val dir = ExtensionHost.ensureExtensionsDir()
+            val jar = dir.resolve("fake.jar")
+            writeJar(
+                jar,
+                manifest = """{"name":"Fake Source","version":4,"pluginClassName":"app.cloudstream.desktop.FakeCatalog"}""",
+            )
+
+            val archive = ExtensionHost.installed().single()
+
+            assertEquals("Fake Source", archive.name)
+            assertEquals(4, archive.version)
+            assertTrue(archive.enabled)
+            assertEquals(jar, archive.file)
+        }
+    }
+
+    @Test
+    fun `disables and re-enables an extension`() {
+        withTempHome {
+            val dir = ExtensionHost.ensureExtensionsDir()
+            val jar = dir.resolve("fake.jar")
+            writeJar(
+                jar,
+                manifest = """{"name":"Fake Source","version":1,"pluginClassName":"app.cloudstream.desktop.FakeCatalog"}""",
+            )
+            assertEquals(1, ExtensionHost.loadAll().loaded.size)
+
+            ExtensionHost.setEnabled(jar, false)
+
+            assertTrue(ExtensionHost.loadAll().loaded.isEmpty())
+            assertFalse(ExtensionHost.installed().single().enabled)
+
+            ExtensionHost.setEnabled(jar, true)
+
+            assertEquals(1, ExtensionHost.loadAll().loaded.size)
+            assertTrue(ExtensionHost.installed().single().enabled)
+        }
+    }
+
+    @Test
+    fun `uninstalls an extension and drops its providers`() {
+        withTempHome {
+            val dir = ExtensionHost.ensureExtensionsDir()
+            val jar = dir.resolve("fake.jar")
+            writeJar(
+                jar,
+                manifest = """{"name":"Fake Source","version":1,"pluginClassName":"app.cloudstream.desktop.FakeCatalog"}""",
+            )
+            assertEquals(1, ExtensionHost.loadAll().loaded.size)
+
+            ExtensionHost.uninstall(jar).getOrThrow()
+
+            assertTrue(Files.notExists(jar))
+            assertTrue(ExtensionHost.installed().isEmpty())
+            assertTrue(ExtensionHost.loadAll().loaded.isEmpty())
         }
     }
 
@@ -322,5 +343,37 @@ class SettingsBackupTest {
             Backup.restore(zip, extensions)
         }
         assertTrue(failure.message!!.contains("no CloudStream backup data"), failure.message)
+    }
+}
+
+/** Which link a season's batch download picks for one episode. */
+class DownloadSelectionTest {
+    @Test
+    fun `prefers a direct file over an hls playlist`() {
+        val links = listOf(
+            StreamLink("hls", "https://cdn.example/ep1/master.m3u8"),
+            StreamLink(
+                "direct",
+                "https://cdn.example/ep1.mp4",
+                headers = mapOf("Referer" to "https://example.com"),
+            ),
+        )
+
+        val best = links.bestDownloadLink()
+
+        assertEquals("https://cdn.example/ep1.mp4", best?.url)
+        assertEquals(mapOf("Referer" to "https://example.com"), best?.headers)
+    }
+
+    @Test
+    fun `falls back to the playlist when nothing else is offered`() {
+        val links = listOf(StreamLink("hls", "https://cdn.example/live/index.m3u8?token=1"))
+
+        assertEquals("https://cdn.example/live/index.m3u8?token=1", links.bestDownloadLink()?.url)
+    }
+
+    @Test
+    fun `an episode without links has nothing to download`() {
+        assertNull(emptyList<StreamLink>().bestDownloadLink())
     }
 }

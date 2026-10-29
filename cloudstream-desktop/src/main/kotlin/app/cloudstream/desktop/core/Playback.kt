@@ -52,7 +52,7 @@ data class PlaybackSession(
         val data = episode?.data ?: directDataUrl ?: return emptyList()
         val legacy = catalog as? LegacyCatalog
         if (legacy != null) return legacy.streamsFor(data, episode?.label)
-        // Native catalogs (the built-in IPTV source) hand out one playable URL.
+        // Plain catalogs hand out one playable URL.
         return listOf(StreamLink(episode?.label ?: title, data))
     }
 }
@@ -94,6 +94,20 @@ fun sessionEpisodes(
     episodeMap: Map<DubStatus, Map<Int, List<DesktopEpisode>>>,
     dubStatus: DubStatus,
 ): List<SessionEpisode> = sessionEpisodes(episodeMap[dubStatus] ?: emptyMap())
+
+/** True for HLS/DASH manifests: a playlist, not a file that can be saved and played back. */
+fun isStreamPlaylist(url: String): Boolean {
+    val path = url.substringBefore('?').substringBefore('#').lowercase()
+    return path.endsWith(".m3u8") || path.endsWith(".mpd")
+}
+
+/**
+ * The link to download for an episode. A direct file wins over an HLS/DASH manifest, because
+ * writing a playlist to disk gives a file no player can open. When the provider only offers a
+ * playlist the first link is still returned, so the queue keeps working for those sources.
+ */
+fun List<StreamLink>.bestDownloadLink(): StreamLink? =
+    firstOrNull { !isStreamPlaylist(it.url) } ?: firstOrNull()
 
 /**
  * Resume rules, matching the original: a saved position in the middle of an episode resumes,

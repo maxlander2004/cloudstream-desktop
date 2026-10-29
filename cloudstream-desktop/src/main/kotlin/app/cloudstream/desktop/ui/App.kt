@@ -28,7 +28,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Home
@@ -38,7 +41,11 @@ import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +53,8 @@ import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,7 +88,7 @@ import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.ExtensionLoadResult
 import app.cloudstream.desktop.core.ExtensionRepository
-import app.cloudstream.desktop.core.IptvSource
+import app.cloudstream.desktop.core.InstalledArchive
 import app.cloudstream.desktop.core.Library
 import app.cloudstream.desktop.core.PlaybackSession
 import app.cloudstream.desktop.core.Player
@@ -104,6 +113,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.net.URI
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
 
 private enum class Screen(val label: String, val icon: ImageVector) {
@@ -125,9 +135,10 @@ private data class SourceEntry(
 fun App() {
     val scope = rememberCoroutineScope()
     val settings = remember { Settings() }
-    val builtin = remember { IptvSource() }
 
     var extensions by remember { mutableStateOf(ExtensionLoadResult()) }
+    /** Every archive on disk, including disabled ones; drives the Extensions screen list. */
+    var installedExtensions by remember { mutableStateOf<List<InstalledArchive>>(emptyList()) }
     var screen by remember { mutableStateOf(Screen.Home) }
     var settingsPage by remember { mutableStateOf(SettingsPage.Root) }
     var darkTheme by remember { mutableStateOf(settings.appTheme != "light") }
@@ -140,6 +151,9 @@ fun App() {
     var accent by remember { mutableStateOf(accentColor(settings.accentColor)) }
     var failure by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Loading…") }
+    // Upstream surfaces these messages as toasts; a snackbar keeps the window free of a
+    // permanent status line.
+    val snackbar = remember { SnackbarHostState() }
 
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
@@ -166,23 +180,22 @@ fun App() {
 
     var updateBanner by remember { mutableStateOf<UpdateCheck?>(null) }
 
-    // Filtered by the Providers settings: extension languages, preferred media, NSFW.
+    // One source per provider an installed extension registered, exactly like the original's
+    // provider list; the app ships no sources of its own.
     val allSources = remember(extensions) {
-        listOf(SourceEntry(builtin.name, builtin.description, "built-in", builtin)) +
-            extensions.loaded.map {
-                SourceEntry(
-                    name = it.manifest.name ?: it.catalog.name,
-                    description = it.catalog.description,
-                    origin = it.file.fileName.toString(),
-                    catalog = it.catalog,
-                )
-            }
+        extensions.loaded.map {
+            SourceEntry(
+                name = it.manifest.name ?: it.catalog.name,
+                description = it.catalog.description,
+                origin = it.file.fileName.toString(),
+                catalog = it.catalog,
+            )
+        }
     }
     val sources = remember(allSources, settings.providerLanguages) {
         if (settings.providerLanguages.isEmpty()) allSources
         else allSources.filter { source ->
-            source.origin == "built-in" ||
-                source.catalog.language?.lowercase() in settings.providerLanguages
+            source.catalog.language?.lowercase() in settings.providerLanguages
         }
     }
     val current = sources.getOrNull(sourceIndex.coerceIn(0, sources.lastIndex.coerceAtLeast(0)))
@@ -197,6 +210,14 @@ fun App() {
             (media.isEmpty() || item.type.name in media || item.type == ItemType.OTHER) &&
                 (settings.nsfwEnabled || item.type != ItemType.NSFW)
         }
+    }
+
+    /** Reloads providers and the on-disk list together; every install path ends here. */
+    suspend fun reloadExtensionsFromDisk(): ExtensionLoadResult {
+        val loaded = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+        extensions = loaded
+        installedExtensions = withContext(Dispatchers.IO) { ExtensionHost.installed() }
+        return loaded
     }
 
     fun installExtension() {
@@ -215,7 +236,7 @@ fun App() {
         scope.launch {
             status = "Installing ${source.fileName}…"
             val result = withContext(Dispatchers.IO) { ExtensionHost.install(source) }
-            extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+            reloadExtensionsFromDisk()
             sourceIndex = 0
             status = result.fold(
                 onSuccess = { "Installed ${it.manifest.name ?: it.catalog.name}" },
@@ -227,9 +248,49 @@ fun App() {
     fun reloadExtensions() {
         scope.launch {
             status = "Loading extensions…"
-            extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+            reloadExtensionsFromDisk()
             sourceIndex = 0
             status = "${extensions.loaded.size} extension(s) loaded"
+        }
+    }
+
+    /** Removes an extension and its providers, the original's delete action. */
+    fun uninstallExtension(file: Path) {
+        scope.launch {
+            status = "Removing ${file.fileName}…"
+            val result = withContext(Dispatchers.IO) { ExtensionHost.uninstall(file) }
+            reloadExtensionsFromDisk()
+            sourceIndex = 0
+            status = result.fold(
+                onSuccess = { "Removed ${file.fileName}" },
+                onFailure = { "Could not remove ${file.fileName}: ${it.message}" },
+            )
+        }
+    }
+
+    /** Enable/disable without deleting, like the original's per-extension switch. */
+    fun setExtensionEnabled(file: Path, enabled: Boolean) {
+        scope.launch {
+            withContext(Dispatchers.IO) { ExtensionHost.setEnabled(file, enabled) }
+            reloadExtensionsFromDisk()
+            sourceIndex = 0
+            status = if (enabled) "Enabled ${file.fileName}" else "Disabled ${file.fileName}"
+        }
+    }
+
+    /** Installs an extension from a .cs3/.jar url, the way the app handles a plugin link. */
+    fun installExtensionFromUrl(url: String) {
+        scope.launch {
+            installing = url
+            status = "Downloading ${url.substringAfterLast('/')}…"
+            val result = withContext(Dispatchers.IO) { ExtensionHost.installFromUrl(url) }
+            reloadExtensionsFromDisk()
+            sourceIndex = 0
+            installing = null
+            status = result.fold(
+                onSuccess = { "Installed ${it.manifest.name ?: it.file.fileName}" },
+                onFailure = { "Install failed: ${it.message}" },
+            )
         }
     }
 
@@ -258,6 +319,7 @@ fun App() {
         withContext(Dispatchers.IO) {
             val file = ExtensionRepository.install(plugin, ExtensionHost.ensureExtensionsDir())
             // Same rule as a manual install: a copy is only kept if it actually loads.
+            ExtensionHost.setEnabled(file, true)
             val load = ExtensionHost.loadAll()
             load.loaded.firstOrNull { it.file == file }
                 ?: run {
@@ -268,6 +330,12 @@ fun App() {
                         ?: "does not contain a loadable extension"
                     error(reason)
                 }
+            // A repository can mark a provider Down; upstream installs it disabled until it
+            // comes back, so it stays on disk without joining the provider list.
+            if (plugin.status == 0) {
+                ExtensionHost.setEnabled(file, false)
+                ExtensionHost.loadAll()
+            }
         }
         "${plugin.name} v${plugin.version}"
     }
@@ -277,7 +345,7 @@ fun App() {
             installing = plugin.internalName
             status = "Downloading ${plugin.name} v${plugin.version}…"
             val result = installPlugin(plugin)
-            extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+            reloadExtensionsFromDisk()
             sourceIndex = 0
             installing = null
             status = result.fold(
@@ -311,7 +379,7 @@ fun App() {
                     installing = plugin.internalName
                     if (installPlugin(plugin).isSuccess) changed++
                     installing = null
-                    extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+                    reloadExtensionsFromDisk()
                 }
             }
             if (settings.autoDownloadPlugins) {
@@ -320,7 +388,7 @@ fun App() {
                         installing = plugin.internalName
                         if (installPlugin(plugin).isSuccess) changed++
                         installing = null
-                        extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+                        reloadExtensionsFromDisk()
                     }
                 }
             }
@@ -439,8 +507,7 @@ fun App() {
 
     /**
      * Opens the result/detail screen for an item when the current source is an upstream
-     * extension (LegacyCatalog). Falls back to the simple stream dialog for native catalogs
-     * like the built-in IPTV source.
+     * extension (LegacyCatalog). Falls back to the simple stream dialog for plain catalogs.
      */
     fun openItem(item: CatalogItem, resumeEpisodeData: String? = null) {
         resumeEpisode = resumeEpisodeData
@@ -494,8 +561,10 @@ fun App() {
         }
     }
 
+    LaunchedEffect(status) { snackbar.showSnackbar(status) }
+
     LaunchedEffect(Unit) {
-        extensions = withContext(Dispatchers.IO) { ExtensionHost.loadAll() }
+        reloadExtensionsFromDisk()
         status = "${extensions.loaded.size} extension(s) loaded"
         refreshRepository()
 
@@ -597,19 +666,12 @@ fun App() {
                             failure = failure,
                             onRetry = ::loadBrowse,
                             onOpen = { openItem(it) },
+                            onAddExtension = {
+                                screen = Screen.Settings
+                                settingsPage = SettingsPage.Extensions
+                            },
                             posterSize = settings.posterSize,
                             titleUnder = settings.posterTitleUnder,
-                            preferredMedia = settings.preferredMedia,
-                            onToggleMedia = { media ->
-                                val selected = settings.preferredMedia
-                                // Empty means "show every type", the same rule the filter uses.
-                                settings.preferredMedia = when {
-                                    selected.isEmpty() -> MediaTypeChips.map { it.first } - media
-                                    media in selected -> selected - media
-                                    else -> selected + media
-                                }
-                                loadBrowse()
-                            },
                         )
                     }
 
@@ -724,6 +786,7 @@ fun App() {
                         SettingsPage.Extensions -> ExtensionsScreen(
                             settings = settings,
                             extensions = extensions,
+                            installed = installedExtensions,
                             repos = repos,
                             repoLoading = repoLoading,
                             repoError = repoError,
@@ -732,8 +795,12 @@ fun App() {
                             installing = installing,
                             onReload = ::reloadExtensions,
                             onInstallFile = ::installExtension,
+                            onInstallUrl = ::installExtensionFromUrl,
                             onRefreshRepository = ::refreshRepository,
+                            onUpdateAll = ::updateInstalledPlugins,
                             onInstallRepository = ::installFromRepository,
+                            onUninstall = ::uninstallExtension,
+                            onToggleEnabled = ::setExtensionEnabled,
                             onStatus = { status = it },
                         )
 
@@ -743,8 +810,6 @@ fun App() {
                     }
                 }
 
-                Spacer(Modifier.height(8.dp))
-                Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
             }
         }
 
@@ -838,6 +903,11 @@ fun App() {
                 onStatus = { status = it },
             )
         }
+
+        SnackbarHost(
+            snackbar,
+            Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
         }
     }
 }
@@ -856,63 +926,52 @@ private fun HomeScreen(
     failure: String?,
     onRetry: () -> Unit,
     onOpen: (CatalogItem) -> Unit,
+    onAddExtension: () -> Unit,
     posterSize: Int,
     titleUnder: Boolean,
-    preferredMedia: List<String>,
-    onToggleMedia: (String) -> Unit,
 ) {
-    Text("CloudStream", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.onBackground)
-    Text(
-        "Native desktop build · ${sources.size} source(s)",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 12.sp,
-    )
-    Spacer(Modifier.height(10.dp))
-
-    // Provider chips — the original's "Home source" picker, laid out as a desktop row.
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(
-            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            sources.forEachIndexed { index, source ->
-                FilterChip(
-                    selected = index == currentSourceIndex,
-                    onClick = { onSelectSource(index) },
-                    label = { Text(source.name) },
+    // A fresh install has no providers: the original ships no built-in source either, so the
+    // home screen points at Extensions instead of drawing an empty grid.
+    if (sources.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "No providers installed",
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Medium,
                 )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "CloudStream has no built-in sources. Add an extension — the same .cs3\n" +
+                        "archives the Android app uses — to start browsing.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(14.dp))
+                Button(onClick = onAddExtension) { Text("Open Extensions") }
             }
         }
-        TextButton(onClick = { onSelectHomepage(currentSourceIndex) }) {
-            Text("Set as homepage", fontSize = 12.sp)
-        }
+        return
     }
 
-    Spacer(Modifier.height(8.dp))
+    var showSources by remember { mutableStateOf(false) }
 
-    // Upstream's media-type chips: Movies, TV Series, Anime, Livestreams, NSFW.
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        MediaTypeChips.forEach { (media, label) ->
-            FilterChip(
-                selected = preferredMedia.isEmpty() || media in preferredMedia,
-                onClick = { onToggleMedia(media) },
-                label = { Text(label, fontSize = 11.sp) },
+    Box(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+    // The reload button at the top right, where `home_preview_reload_provider` sits.
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = onRetry) {
+            Icon(
+                Icons.Outlined.Refresh,
+                contentDescription = "Reload provider",
+                modifier = Modifier.size(20.dp),
             )
         }
     }
-    Spacer(Modifier.height(10.dp))
-
-    val description = sources.getOrNull(currentSourceIndex)?.description.orEmpty()
-    if (description.isNotEmpty()) {
-        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-        Spacer(Modifier.height(10.dp))
-    }
+    Spacer(Modifier.height(6.dp))
 
     // Upstream's Continue watching rail, built from the local watch history.
     if (continueWatching.isNotEmpty()) {
@@ -962,6 +1021,51 @@ private fun HomeScreen(
             titleUnder = titleUnder,
             onOpen = onOpen,
         )
+    }
+    }
+
+    // Upstream's `home_api_fab`: the Home source button that switches which provider the
+    // home screen shows, floating bottom-end exactly as the Android app draws it.
+    Box(Modifier.align(Alignment.BottomEnd).padding(18.dp)) {
+        ExtendedFloatingActionButton(
+            onClick = { showSources = true },
+            icon = { Icon(Icons.Outlined.FilterList, contentDescription = null) },
+            text = { Text("Home source") },
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.primary,
+        )
+        DropdownMenu(
+            expanded = showSources,
+            onDismissRequest = { showSources = false },
+        ) {
+            sources.forEachIndexed { index, source ->
+                DropdownMenuItem(
+                    text = { Text(source.name, fontSize = 13.sp) },
+                    leadingIcon = {
+                        if (index == currentSourceIndex) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    },
+                    onClick = {
+                        showSources = false
+                        onSelectSource(index)
+                    },
+                )
+            }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Use as homepage", fontSize = 13.sp) },
+                onClick = {
+                    showSources = false
+                    onSelectHomepage(currentSourceIndex)
+                },
+            )
+        }
+    }
     }
 }
 

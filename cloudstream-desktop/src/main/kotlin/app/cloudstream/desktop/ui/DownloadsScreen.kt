@@ -15,10 +15,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -35,10 +38,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.cloudstream.desktop.api.StreamLink
+import app.cloudstream.desktop.core.BatchProgress
 import app.cloudstream.desktop.core.DownloadManager
 import app.cloudstream.desktop.core.DownloadState
 import app.cloudstream.desktop.core.DownloadTask
@@ -46,6 +51,7 @@ import app.cloudstream.desktop.core.Player
 import app.cloudstream.desktop.core.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.file.Path
 import java.nio.file.Paths
 
 /** Human-readable byte count, e.g. "1.4 GB". */
@@ -70,6 +76,9 @@ fun DownloadsScreen(
     val tasks by DownloadManager.tasks.collectAsState()
     var usage by remember { mutableStateOf<DownloadManager.Usage?>(null) }
     var showNetworkStream by remember { mutableStateOf(false) }
+    val rows = queueRows(tasks)
+    // Batches start expanded; the header folds their episodes away for a one-job view.
+    var collapsed by remember { mutableStateOf(emptySet<String>()) }
 
     // Refresh the storage bar whenever the folder or the finished downloads change.
     LaunchedEffect(settings.downloadsDir, tasks.count { it.state == DownloadState.DONE }) {
@@ -115,18 +124,43 @@ fun DownloadsScreen(
                 Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
             ) {
-                items(tasks, key = { it.id }) { task ->
-                    DownloadRow(
-                        task = task,
-                        onPlay = {
-                            onPlayFile(task.title, Paths.get(settings.downloadsDir, task.fileName).toString())
-                        },
-                        onDelete = {
-                            DownloadManager.remove(task.id, Paths.get(settings.downloadsDir))
-                            onStatus("Removed ${task.title}")
-                        },
-                        onStatus = onStatus,
-                    )
+                items(rows, key = { it.key }) { row ->
+                    when (row) {
+                        is DownloadsRow.Single -> DownloadRow(
+                            task = row.task,
+                            onPlay = {
+                                onPlayFile(
+                                    row.task.title,
+                                    Paths.get(settings.downloadsDir, row.task.fileName).toString(),
+                                )
+                            },
+                            onDelete = {
+                                DownloadManager.remove(row.task.id, Paths.get(settings.downloadsDir))
+                                onStatus("Removed ${row.task.title}")
+                            },
+                            onStatus = onStatus,
+                        )
+
+                        is DownloadsRow.Batch -> BatchDownloadRow(
+                            group = row.group,
+                            tasks = row.tasks,
+                            expanded = row.key !in collapsed,
+                            onToggle = {
+                                collapsed = if (row.key in collapsed) {
+                                    collapsed - row.key
+                                } else {
+                                    collapsed + row.key
+                                }
+                            },
+                            onRetryFailed = {
+                                val retried = DownloadManager.retryFailed(settings, row.group)
+                                onStatus("Retrying $retried episode(s) of ${row.group}")
+                            },
+                            downloadsDir = Paths.get(settings.downloadsDir),
+                            onPlayFile = onPlayFile,
+                            onStatus = onStatus,
+                        )
+                    }
                 }
             }
         }
@@ -194,12 +228,13 @@ private fun DownloadRow(
     onPlay: () -> Unit,
     onDelete: () -> Unit,
     onStatus: (String) -> Unit,
+    background: Color = MaterialTheme.colorScheme.surface,
 ) {
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
+            .background(background)
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -247,6 +282,146 @@ private fun DownloadRow(
                 progress = { task.progress },
                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
             )
+        }
+    }
+}
+
+/** One entry of the queue: a plain download, or a whole batch folded into a single job. */
+internal sealed interface DownloadsRow {
+    val key: String
+
+    data class Single(val task: DownloadTask) : DownloadsRow {
+        override val key: String get() = task.id
+    }
+
+    data class Batch(val group: String, val tasks: List<DownloadTask>) : DownloadsRow {
+        override val key: String get() = "group:$group"
+    }
+}
+
+/**
+ * Tasks in queue order, with each batch collapsed into one row where its first episode landed,
+ * so a 24-episode show is one job instead of 24 rows among the single downloads.
+ */
+internal fun queueRows(tasks: List<DownloadTask>): List<DownloadsRow> {
+    val seen = mutableSetOf<String>()
+    val rows = mutableListOf<DownloadsRow>()
+    tasks.forEach { task ->
+        val group = task.group
+        when {
+            group == null -> rows += DownloadsRow.Single(task)
+            seen.add(group) -> rows += DownloadsRow.Batch(
+                group = group,
+                tasks = tasks.filter { it.group == group },
+            )
+        }
+    }
+    return rows
+}
+
+/** "7 of 24 done · 2 downloading · 1 failed": the batch header's one-line summary. */
+internal fun batchDetail(progress: BatchProgress): String {
+    val parts = mutableListOf("${progress.done + progress.failed} of ${progress.total} done")
+    if (progress.running > 0) parts += "${progress.running} downloading"
+    if (progress.queued > 0) parts += "${progress.queued} queued"
+    if (progress.failed > 0) parts += "${progress.failed} failed"
+    return parts.joinToString(" · ")
+}
+
+/**
+ * A season or a whole show as one job: a single bar over every episode, one Cancel for the ones
+ * still running, and the per-episode rows folded underneath.
+ */
+@Composable
+private fun BatchDownloadRow(
+    group: String,
+    tasks: List<DownloadTask>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRetryFailed: () -> Unit,
+    downloadsDir: Path,
+    onPlayFile: (String, String) -> Unit,
+    onStatus: (String) -> Unit,
+) {
+    val progress = BatchProgress.of(tasks)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onToggle, modifier = Modifier.size(28.dp)) {
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Hide episodes" else "Show episodes",
+                )
+            }
+            Spacer(Modifier.width(4.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    group,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp,
+                )
+                Text(
+                    batchDetail(progress),
+                    color = if (progress.failed > 0 && progress.settled) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontSize = 11.sp,
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { progress.fraction },
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
+        )
+        // Actions get their own row: a 24-episode batch can show all three at once.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Spacer(Modifier.weight(1f))
+            if (progress.failed > 0) {
+                TextButton(onClick = onRetryFailed) {
+                    Text("Retry failed (${progress.failed})")
+                }
+            }
+            if (!progress.settled) {
+                TextButton(
+                    onClick = {
+                        DownloadManager.cancelGroup(group)
+                        onStatus("Cancelled $group")
+                    },
+                ) { Text("Cancel all") }
+            }
+            TextButton(
+                onClick = {
+                    DownloadManager.removeGroup(group, downloadsDir)
+                    onStatus("Removed $group")
+                },
+            ) { Text("Delete all") }
+        }
+        if (expanded) {
+            Spacer(Modifier.height(8.dp))
+            tasks.forEach { task ->
+                DownloadRow(
+                    task = task,
+                    onPlay = {
+                        onPlayFile(task.title, downloadsDir.resolve(task.fileName).toString())
+                    },
+                    onDelete = {
+                        DownloadManager.remove(task.id, downloadsDir)
+                        onStatus("Removed ${task.title}")
+                    },
+                    onStatus = onStatus,
+                    background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                )
+                Spacer(Modifier.height(4.dp))
+            }
         }
     }
 }

@@ -37,6 +37,15 @@ data class DownloadTask(
     val error: String? = null,
     /** Subtitle files saved beside the finished download, e.g. `Movie.en.srt`. */
     val subtitles: List<String> = emptyList(),
+    /**
+     * The batch this task belongs to, e.g. `Breaking Bad · All seasons`; null for a download
+     * started from a single link. Tasks sharing a group are shown as one job.
+     */
+    val group: String? = null,
+    /** Request headers the source needs (Referer, User-Agent), kept so a retry still works. */
+    val headers: Map<String, String> = emptyMap(),
+    /** Tracks the source offered, kept so a retry can save subtitles again. */
+    val sourceSubtitles: List<SubtitleTrack> = emptyList(),
 ) {
     val progress: Float
         get() = if (totalBytes > 0) (doneBytes.toFloat() / totalBytes).coerceIn(0f, 1f) else 0f
@@ -45,6 +54,55 @@ data class DownloadTask(
     val playable: Boolean
         get() = state == DownloadState.DONE
 }
+
+/**
+ * Rolled-up state of one batch, so the Downloads screen can show a season or a whole show as a
+ * single job — "7 of 24 done · 2 downloading" with one bar — instead of 24 scattered rows.
+ */
+data class BatchProgress(
+    val total: Int,
+    val done: Int,
+    val failed: Int,
+    val running: Int,
+    val queued: Int,
+    val bytesDone: Long,
+    val bytesTotal: Long,
+    val sizesUnknown: Int,
+) {
+    /** Nothing is left to start, so the batch is finished (possibly with failures). */
+    val settled: Boolean
+        get() = running == 0 && queued == 0
+
+    /**
+     * Byte ratio once every file has reported its size, otherwise the finished-file ratio: a
+     * queued episode has no size yet, so bytes alone would make the bar jump around as a batch
+     * fills up.
+     */
+    val fraction: Float
+        get() = when {
+            bytesTotal > 0 && sizesUnknown == 0 ->
+                (bytesDone.toFloat() / bytesTotal).coerceIn(0f, 1f)
+            total > 0 -> (done + failed).toFloat() / total
+            else -> 0f
+        }
+
+    companion object {
+        fun of(tasks: List<DownloadTask>): BatchProgress = BatchProgress(
+            total = tasks.size,
+            done = tasks.count { it.state == DownloadState.DONE },
+            failed = tasks.count { it.state == DownloadState.FAILED },
+            running = tasks.count { it.state == DownloadState.RUNNING },
+            queued = tasks.count { it.state == DownloadState.QUEUED },
+            bytesDone = tasks.sumOf { it.doneBytes.coerceAtLeast(0) },
+            bytesTotal = tasks.sumOf { it.totalBytes.coerceAtLeast(0) },
+            sizesUnknown = tasks.count { it.totalBytes <= 0 },
+        )
+    }
+}
+
+/** The failed episodes of a batch, in queue order — what *Retry failed* re-queues. */
+internal fun failedInGroup(tasks: List<DownloadTask>, group: String): List<DownloadTask> =
+    tasks.filter { task -> task.group == group && task.state == DownloadState.FAILED }
 
 /**
  * The desktop counterpart of the original's Downloads screen: a queue of direct-file
@@ -104,6 +162,47 @@ object DownloadManager {
         mutate { list -> list.filterNot { it.id == id } }
     }
 
+    /** Stops every running or queued episode of a batch; finished ones are left alone. */
+    fun cancelGroup(group: String) {
+        _tasks.value
+            .filter { task ->
+                task.group == group &&
+                    (task.state == DownloadState.QUEUED || task.state == DownloadState.RUNNING)
+            }
+            .forEach { task -> cancel(task.id) }
+    }
+
+    /** Removes a whole batch, deleting the finished files when [dir] is given. */
+    fun removeGroup(group: String, dir: Path? = null) {
+        _tasks.value.filter { it.group == group }.forEach { task -> remove(task.id, dir) }
+    }
+
+    /**
+     * Re-queues a failed download with the URL, headers and subtitles it was started with. The
+     * failed row is replaced by a fresh one, so the queue never shows the same episode twice.
+     */
+    fun retry(settings: Settings, id: String): Boolean {
+        val task = _tasks.value.firstOrNull { it.id == id && it.state == DownloadState.FAILED }
+            ?: return false
+        remove(id)
+        add(
+            settings = settings,
+            title = task.title,
+            url = task.url,
+            headers = task.headers,
+            subtitles = task.sourceSubtitles,
+            group = task.group,
+        )
+        return true
+    }
+
+    /** Re-queues every failed episode of a batch; returns how many were restarted. */
+    fun retryFailed(settings: Settings, group: String): Int {
+        val failed = failedInGroup(_tasks.value, group)
+        failed.forEach { task -> retry(settings, task.id) }
+        return failed.size
+    }
+
     /**
      * Queues a download into [Settings.downloadsDir]. Returns the queued task's id.
      */
@@ -113,10 +212,21 @@ object DownloadManager {
         url: String,
         headers: Map<String, String> = emptyMap(),
         subtitles: List<SubtitleTrack> = emptyList(),
+        group: String? = null,
     ): String {
         val id = "dl-${Random.nextLong(Long.MAX_VALUE)}"
         val fileName = guessFileName(title, url)
-        mutate { it + DownloadTask(id = id, title = title, url = url, fileName = fileName) }
+        mutate {
+            it + DownloadTask(
+                id = id,
+                title = title,
+                url = url,
+                fileName = fileName,
+                group = group,
+                headers = headers,
+                sourceSubtitles = subtitles,
+            )
+        }
 
         semaphore = Semaphore(settings.parallelDownloads.coerceIn(1, 10))
         val connections = settings.concurrentConnections.coerceIn(1, 10)
