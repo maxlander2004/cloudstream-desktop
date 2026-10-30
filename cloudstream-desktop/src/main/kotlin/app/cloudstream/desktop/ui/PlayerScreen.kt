@@ -235,17 +235,16 @@ fun PlayerScreen(
             }
             onStatus("Starting torrent…")
             val local = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                runCatching {
-                    TorrentEngine.prepare(stream.url, settings.torrentDir, settings.aria2Path)
-                }.getOrNull()
+                TorrentEngine.prepare(stream.url, settings.torrentDir, settings.aria2Path)
             }
-            if (local == null) {
+            if (local.isFailure) {
                 loading = false
-                error = TorrentEngine.unavailableMessage(settings.aria2Path)
-                    ?: "The torrent did not start"
+                error = local.exceptionOrNull()?.message
+                    ?: TorrentEngine.unavailableMessage(settings.aria2Path)
+                onStatus("Torrent failed to start: ${error}")
                 return
             }
-            local
+            local.getOrThrow()
         } else {
             stream.url
         }

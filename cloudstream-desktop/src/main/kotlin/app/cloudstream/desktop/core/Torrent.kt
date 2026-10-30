@@ -4,7 +4,6 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.io.RandomAccessFile
 import java.net.InetSocketAddress
-import java.net.URI
 import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
@@ -16,9 +15,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Torrent playback, the desktop answer to upstream's torrent extractors.
  *
  * BitTorrent itself is not reimplemented here: the app drives **aria2c**, which is the same
- * idea as the Android build depending on the platform's torrent stack. aria2 writes the file
- * sequentially (`--bt-sequential`), and a small HTTP bridge on localhost serves the growing
- * file to VLC, blocking on reads until the bytes it needs exist.
+ * idea as the Android build depending on the platform's torrent stack. aria2 has no
+ * sequential-download mode, so the head pieces of each file are prioritised instead — enough
+ * for a player to start while the rest arrives. A small HTTP bridge on localhost serves the
+ * growing file to VLC, blocking on reads until the bytes it needs exist.
  *
  * When aria2c is not installed the player says so instead of pretending the stream failed —
  * there is no way to fetch a magnet link without a torrent client.
@@ -46,12 +46,16 @@ object TorrentEngine {
 
     // ------------------------------------------------------------------ detection
 
-    fun isTorrentUrl(url: String): Boolean =
-        url.trim().startsWith("magnet:", ignoreCase = true)
+    /** A magnet link, or a URL/file that points at a `.torrent` — both open the same way. */
+    fun isTorrentUrl(url: String): Boolean {
+        val trimmed = url.trim()
+        return trimmed.startsWith("magnet:", ignoreCase = true) ||
+            trimmed.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
+    }
 
     /**
      * The name a magnet carries in its `dn` parameter. A magnet is an opaque URI, so its query
-     * is read from the text — [URI] reports no query part for `magnet:?…`.
+     * is read from the text — [java.net.URI] reports no query part for `magnet:?…`.
      */
     fun magnetName(magnet: String): String? = runCatching {
         magnet.trim()
@@ -95,59 +99,93 @@ object TorrentEngine {
         binary(configuredPath)?.let { "aria2c found at $it" }
             ?: "aria2c was not found — install it (or point the path below at it) to play torrents"
 
-    fun unavailableMessage(configuredPath: String): String = binary(configuredPath)?.let { null }
-        ?: "This link is a torrent, and aria2c was not found. Install aria2 and set its path in " +
-            "Settings → Player, then try again."
+    fun unavailableMessage(configuredPath: String): String =
+        if (binary(configuredPath) == null) {
+            "This link is a torrent, and aria2c was not found. Install aria2 and set its path in " +
+                "Settings → Player, then try again."
+        } else {
+            "The torrent did not start"
+        }
+
+    // ------------------------------------------------------------------ arguments
+
+    /**
+     * The aria2c invocation. Every flag here is checked against a real aria2 — `--bt-sequential`
+     * looks like the right option but does not exist, and aria2 exits immediately on an option it
+     * does not know, which is exactly the failure this file used to produce.
+     */
+    internal fun commandFor(executable: String, folder: Path, magnet: String): List<String> = listOf(
+        executable,
+        "--dir=${folder.toAbsolutePath()}",
+        // aria2 downloads pieces in order it does not know about, so pull the head of each file
+        // first: that is what a player needs to open the stream.
+        "--bt-prioritize-piece=head=16M",
+        "--seed-time=0",
+        "--file-allocation=none",
+        "--summary-interval=0",
+        "--console-log-level=warn",
+        "--bt-save-metadata=true",
+        "--auto-file-renaming=false",
+        "--allow-overwrite=true",
+        "--disk-cache=64M",
+        magnet,
+    )
 
     // ------------------------------------------------------------------ streaming
 
     /**
-     * Starts fetching [magnet] and returns a localhost URL VLC can open. Blocks until the
-     * first bytes are on disk, so the player does not open an empty stream.
+     * Starts fetching the magnet and returns the localhost URL VLC should open. Fails fast when
+     * aria2 cannot run at all — an unknown option or a broken binary shows up within a second,
+     * and waiting out the whole file timeout would only hide the reason.
      */
-    fun prepare(magnet: String, downloadDir: String, aria2Path: String): String? {
-        val executable = binary(aria2Path) ?: return null
+    fun prepare(magnet: String, downloadDir: String, aria2Path: String): Result<String> = runCatching {
+        val executable = binary(aria2Path)
+            ?: error(unavailableMessage(aria2Path))
         val root = Paths.get(downloadDir.ifBlank { defaultDir() })
         Files.createDirectories(root)
 
         val key = Integer.toHexString(magnet.hashCode())
-        streams[key]?.let { existing -> return urlFor(key) }
+        if (streams.containsKey(key)) return Result.success(urlFor(key))
 
         val folder = root.resolve(key)
         Files.createDirectories(folder)
         val log = folder.resolve("aria2.log")
 
-        val command = buildList {
-            add(executable)
-            add("--dir=${folder.toAbsolutePath()}")
-            add("--bt-sequential=true")
-            add("--seed-time=0")
-            add("--file-allocation=none")
-            add("--summary-interval=0")
-            add("--console-log-level=warn")
-            add("--bt-save-metadata=true")
-            add("--auto-file-renaming=false")
-            add("--allow-overwrite=true")
-            add("--disk-cache=64M")
-            add(magnet)
-        }
-        val process = runCatching {
-            ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
-                .start()
-        }.getOrNull()
+        val process = ProcessBuilder(commandFor(executable, folder, magnet))
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
+            .start()
 
-        val file = waitForFile(folder, timeoutMs = 60_000)
-        if (file == null) {
-            runCatching { process?.destroyForcibly() }
-            return null
+        // aria2 dies instantly on an option it does not recognise; say why instead of spinning.
+        if (process.waitFor(1500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            val exit = process.exitValue()
+            val reason = logTail(log).takeIf { it.isNotBlank() }
+                ?: "aria2c exited with code $exit"
+            error("aria2c could not start: $reason")
         }
+
+        val file = waitForFile(folder, process, timeoutMs = 60_000)
+            ?: run {
+                val reason = logTail(log)
+                process.destroyForcibly()
+                error(
+                    if (reason.isBlank()) "aria2c did not produce a file within a minute"
+                    else "aria2c gave up: $reason",
+                )
+            }
+
         streams[key] = StreamState(file, process)
         // Make sure the bridge is listening before the player is handed the URL.
         server
-        return urlFor(key)
+        urlFor(key)
     }
+
+    private fun logTail(log: Path): String = runCatching {
+        if (!Files.isRegularFile(log)) return@runCatching ""
+        Files.readAllLines(log)
+            .last { it.isNotBlank() }
+            .trim()
+    }.getOrDefault("")
 
     private fun urlFor(key: String) = "http://127.0.0.1:$PORT/torrent/$key"
 
@@ -160,11 +198,15 @@ object TorrentEngine {
         streams.clear()
     }
 
-    private fun waitForFile(folder: Path, timeoutMs: Long): Path? {
+    private fun waitForFile(folder: Path, process: Process?, timeoutMs: Long): Path? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val candidate = runCatching { largestVideoFile(folder) }.getOrNull()
             if (candidate != null) return candidate
+            if (process != null && !process.isAlive && System.currentTimeMillis() > deadline - timeoutMs + 8000) {
+                // It survived startup but stopped before writing anything — give up early.
+                return null
+            }
             Thread.sleep(400)
         }
         return null
@@ -187,7 +229,7 @@ object TorrentEngine {
     /** Still downloading while aria2's control file is beside the media file. */
     private fun downloading(file: Path, process: Process?): Boolean =
         Files.exists(Paths.get(file.toString() + ".aria2")) ||
-            (process?.isAlive == true && Files.size(file) == 0L)
+            (process?.isAlive == true && runCatching { Files.size(file) }.getOrDefault(0L) == 0L)
 
     // ------------------------------------------------------------------ HTTP bridge
 
@@ -253,9 +295,9 @@ object TorrentEngine {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (runCatching { Files.size(file) }.getOrDefault(0L) >= needed) return true
-            if (!downloading(file, null) && runCatching { Files.size(file) }.getOrDefault(0L) < needed) {
+            if (!downloading(file, null)) {
                 // aria2 stopped early (bad magnet, no peers) — do not hold the player open.
-                return false
+                return runCatching { Files.size(file) }.getOrDefault(0L) >= needed
             }
             Thread.sleep(200)
         }

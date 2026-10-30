@@ -61,6 +61,21 @@ class TorrentTest {
     }
 
     @Test
+    fun `the aria2 command uses options aria2 actually has`() {
+        val command = TorrentEngine.commandFor(
+            "/usr/bin/aria2c",
+            java.nio.file.Paths.get("/tmp/dl"),
+            "magnet:?xt=urn:btih:abc",
+        )
+        // aria2 1.37 rejects this outright, which silently killed every torrent.
+        assertFalse(command.contains("--bt-sequential=true"))
+        assertTrue(command.contains("--bt-prioritize-piece=head=16M"))
+        assertTrue(command.contains("--file-allocation=none"))
+        assertEquals("magnet:?xt=urn:btih:abc", command.last())
+        assertEquals("/usr/bin/aria2c", command.first())
+    }
+
+    @Test
     fun `a magnet is never chosen as a download link`() {
         val links = listOf(
             StreamLink("Torrent", "magnet:?xt=urn:btih:abc"),
