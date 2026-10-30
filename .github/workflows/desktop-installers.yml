@@ -149,7 +149,10 @@ jobs:
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "CloudStream Desktop $TAG" --generate-notes --verify-tag
+            # v1.3.9-desktop -> 1.3.9, so auto-created releases match the earlier titles.
+            VERSION="${TAG#v}"
+            VERSION="${VERSION%-desktop}"
+            gh release create "$TAG" --title "CloudStream Desktop $VERSION" --generate-notes --verify-tag
           fi
           files="$(find installers -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.deb' \))"
           if [ -z "$files" ]; then
