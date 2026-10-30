@@ -48,9 +48,19 @@ enum class TrackingProvider(
         description = "Anime and manga lists. Create an app at myanimelist.net/apiconfig with the " +
             "redirect URL http://127.0.0.1:47199/mal.",
         registerUrl = "https://myanimelist.net/apiconfig",
+    ),
+    Simkl(
+        id = "simkl",
+        label = "Simkl",
+        description = "Anime, TV and movies. Simkl's PIN flow needs only a client ID: create an app " +
+            "at simkl.com/settings/developer and paste its client ID below.",
+        registerUrl = "https://simkl.com/settings/developer",
     );
 
     val redirectUrl: String get() = "http://127.0.0.1:${Accounts.PORT}/$id"
+
+    /** Simkl uses a PIN instead of a redirect, so it never touches the loopback listener. */
+    val usesPin: Boolean get() = this == Simkl
 
     companion object {
         fun of(id: String?): TrackingProvider? = entries.firstOrNull { it.id == id }
@@ -164,6 +174,8 @@ object Accounts {
                 when (provider) {
                     TrackingProvider.AniList -> aniListAccount(payload, trimmed)
                     TrackingProvider.MyAnimeList -> malAccount(payload, trimmed, verifier!!)
+                    TrackingProvider.Simkl ->
+                        error("Simkl signs in with a PIN — use startPin and completePin")
                 }
             } finally {
                 server.stop()
@@ -194,6 +206,7 @@ object Accounts {
             append("&state=").append(enc("cloudstream-desktop"))
             append("&redirect_uri=").append(enc(provider.redirectUrl))
         }
+        TrackingProvider.Simkl -> error("Simkl signs in with a PIN, not a redirect")
     }
 
     private suspend fun aniListAccount(payload: String, clientId: String): LinkedAccount {
@@ -295,6 +308,72 @@ object Accounts {
             access
         }.getOrNull()
     }
+
+    // ------------------------------------------------------------------ Simkl PIN
+
+    /** Simkl's PIN sign-in: the user authorizes a short code on the Simkl site. */
+    data class PinLogin(
+        val userCode: String,
+        val verificationUrl: String,
+        val intervalMs: Long,
+        val expiresAt: Long,
+    )
+
+    suspend fun startPin(clientId: String): Result<PinLogin> = runCatching {
+        val trimmed = clientId.trim()
+        require(trimmed.isNotEmpty()) { "Enter the Simkl client ID first" }
+        val body = Http.send(
+            method = "GET",
+            url = "https://api.simkl.com/oauth/pin?client_id=${enc(trimmed)}&redirect_uri=cloudstream-desktop",
+        )
+        val root = Json.parseToJsonElement(body).jsonObject
+        val code = root["user_code"]?.jsonPrimitive?.contentOrNull ?: error("Simkl returned no PIN")
+        PinLogin(
+            userCode = code,
+            verificationUrl = root["verification_url"]?.jsonPrimitive?.contentOrNull
+                ?: "https://simkl.com/pin",
+            intervalMs = ((root["interval"]?.jsonPrimitive?.intOrNull ?: 5).toLong() * 1000)
+                .coerceAtLeast(2_000),
+            expiresAt = System.currentTimeMillis() +
+                ((root["expires_in"]?.jsonPrimitive?.intOrNull ?: 900).toLong() * 1000),
+        )
+    }
+
+    /** Polls until the PIN is approved; Simkl returns `{"result":"KO"}` while it is pending. */
+    suspend fun completePin(clientId: String, pin: PinLogin): Result<LinkedAccount> = runCatching {
+        val trimmed = clientId.trim()
+        var token: String? = null
+        while (System.currentTimeMillis() < pin.expiresAt && token == null) {
+            kotlinx.coroutines.delay(pin.intervalMs)
+            val body = runCatching {
+                Http.send(
+                    method = "GET",
+                    url = "https://api.simkl.com/oauth/pin/${enc(pin.userCode)}?client_id=${enc(trimmed)}",
+                )
+            }.getOrNull() ?: continue
+            val root = Json.parseToJsonElement(body).jsonObject
+            if (root["result"]?.jsonPrimitive?.contentOrNull == "OK") {
+                token = root["access_token"]?.jsonPrimitive?.contentOrNull
+                    ?: error("Simkl approved the PIN but sent no token")
+            }
+        }
+        val access = token ?: error("Simkl sign-in timed out")
+        val name = runCatching {
+            val profile = Http.send(
+                method = "GET",
+                url = "https://api.simkl.com/users/settings",
+                headers = mapOf("simkl-api-key" to trimmed, "Authorization" to "Bearer $access"),
+            )
+            Json.parseToJsonElement(profile).jsonObject["user"]?.jsonObject
+                ?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+        }.getOrDefault("")
+        LinkedAccount(
+            provider = TrackingProvider.Simkl.id,
+            username = name.ifBlank { "Simkl" },
+            accessToken = access,
+            clientId = trimmed,
+        )
+    }.onSuccess { save(it) }
 
     // ------------------------------------------------------------------ callback server
 

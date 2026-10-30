@@ -82,6 +82,19 @@ class Settings {
         get() = get("player.subtitleSearchLanguage", "en")
         set(value) = set("player.subtitleSearchLanguage", value.trim().lowercase())
 
+    /** OpenSubtitles JWT from a sign-in; the password itself is never persisted. */
+    var openSubtitlesToken: String
+        get() = get("player.osToken", "")
+        set(value) = set("player.osToken", value)
+
+    var openSubtitlesTokenExpires: Long
+        get() = get("player.osTokenExpiry", "0").toLongOrNull() ?: 0L
+        set(value) = set("player.osTokenExpiry", value.toString())
+
+    var openSubtitlesUser: String
+        get() = get("player.osUser", "")
+        set(value) = set("player.osUser", value.trim())
+
     /** Push watched episodes and bookmarks to the linked AniList/MyAnimeList account. */
     var trackSync: Boolean
         get() = getBool("accounts.sync", true)

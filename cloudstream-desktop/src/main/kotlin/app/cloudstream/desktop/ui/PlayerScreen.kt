@@ -658,7 +658,13 @@ private fun SubtitleSearchDialog(
     var results by remember { mutableStateOf<List<SubtitleHit>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    val apiKey = settings.subdlApiKey
+    val provider = settings.subtitleProvider
+    // SubDL needs its key; OpenSubtitles searches without an account but downloads need one.
+    val ready = when (provider) {
+        SubtitleSearch.PROVIDER_SUBDL -> settings.subdlApiKey.isNotBlank()
+        SubtitleSearch.PROVIDER_OPENSUBTITLES -> true
+        else -> false
+    }
 
     fun runSearch() {
         val text = query.trim()
@@ -667,7 +673,13 @@ private fun SubtitleSearchDialog(
         message = null
         scope.launch {
             val found = runCatching {
-                SubtitleSearch.search(text, language, apiKey)
+                SubtitleSearch.search(
+                    provider = provider,
+                    query = text,
+                    language = language,
+                    subdlApiKey = settings.subdlApiKey,
+                    openSubtitlesToken = settings.openSubtitlesToken,
+                )
             }.getOrElse {
                 message = "Search failed: ${it.message}"
                 emptyList()
@@ -678,16 +690,20 @@ private fun SubtitleSearchDialog(
         }
     }
 
-    LaunchedEffect(Unit) { if (apiKey.isNotBlank()) runSearch() }
+    LaunchedEffect(provider, ready) { if (ready) runSearch() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Search subtitles") },
         text = {
             Column {
-                if (apiKey.isBlank()) {
+                if (!ready) {
                     Text(
-                        "Add a free SubDL API key in Settings → Player to search subtitles online.",
+                        if (provider == SubtitleSearch.PROVIDER_SUBDL) {
+                            "Add a free SubDL API key in Settings → Player to search subtitles online."
+                        } else {
+                            "Choose a subtitle provider in Settings → Player to search online."
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp,
                     )
@@ -736,7 +752,7 @@ private fun SubtitleSearchDialog(
                                 onClick = {
                                     scope.launch {
                                         onStatus("Downloading subtitles…")
-                                        val file = SubtitleSearch.download(hit)
+                                        val file = SubtitleSearch.download(hit, settings.openSubtitlesToken)
                                         if (file == null) {
                                             onStatus("Could not download that subtitle")
                                         } else {

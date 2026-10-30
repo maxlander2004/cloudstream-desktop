@@ -359,6 +359,12 @@ fun PlayerSettings(
     settings: Settings,
     onBack: () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    var osUser by remember { mutableStateOf(settings.openSubtitlesUser) }
+    var osPassword by remember { mutableStateOf("") }
+    var osBusy by remember { mutableStateOf(false) }
+    var osMessage by remember { mutableStateOf<String?>(null) }
+
     SectionHeader("Player", onBack)
 
     SectionLabel("In-app playback")
@@ -416,7 +422,8 @@ fun PlayerSettings(
     SectionLabel("Subtitle search")
     Row(verticalAlignment = Alignment.CenterVertically) {
         FilterChip(
-            selected = settings.subtitleProvider != SubtitleSearch.PROVIDER_SUBDL,
+            selected = settings.subtitleProvider != SubtitleSearch.PROVIDER_SUBDL &&
+                settings.subtitleProvider != SubtitleSearch.PROVIDER_OPENSUBTITLES,
             onClick = { settings.subtitleProvider = "off" },
             label = { Text("Off") },
         )
@@ -426,21 +433,133 @@ fun PlayerSettings(
             onClick = { settings.subtitleProvider = SubtitleSearch.PROVIDER_SUBDL },
             label = { Text("SubDL") },
         )
+        Spacer(Modifier.width(8.dp))
+        FilterChip(
+            selected = settings.subtitleProvider == SubtitleSearch.PROVIDER_OPENSUBTITLES,
+            onClick = { settings.subtitleProvider = SubtitleSearch.PROVIDER_OPENSUBTITLES },
+            label = { Text("OpenSubtitles") },
+        )
     }
     Spacer(Modifier.height(8.dp))
-    OutlinedTextField(
-        value = settings.subdlApiKey,
-        onValueChange = { settings.subdlApiKey = it },
-        label = { Text("SubDL API key") },
-        placeholder = { Text("From subdl.com/panel/api") },
-        singleLine = true,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .clickable { }
-            .padding(vertical = 6.dp, horizontal = 12.dp),
-    )
+
+    when (settings.subtitleProvider) {
+        SubtitleSearch.PROVIDER_SUBDL -> {
+            OutlinedTextField(
+                value = settings.subdlApiKey,
+                onValueChange = { settings.subdlApiKey = it },
+                label = { Text("SubDL API key") },
+                placeholder = { Text("From subdl.com/panel/api") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .clickable { }
+                    .padding(vertical = 6.dp, horizontal = 12.dp),
+            )
+            Text(
+                "Create a free key on your SubDL account; it is stored with the rest of your " +
+                    "settings.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
+            )
+        }
+
+        SubtitleSearch.PROVIDER_OPENSUBTITLES -> {
+            val signedIn = settings.openSubtitlesToken.isNotBlank() &&
+                settings.openSubtitlesTokenExpires > System.currentTimeMillis()
+            if (signedIn) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Signed in as ${settings.openSubtitlesUser.ifBlank { "OpenSubtitles" }}",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            settings.openSubtitlesToken = ""
+                            settings.openSubtitlesTokenExpires = 0
+                            osMessage = "Signed out"
+                        },
+                    ) { Text("Sign out") }
+                }
+            } else {
+                OutlinedTextField(
+                    value = osUser,
+                    onValueChange = { osUser = it },
+                    label = { Text("OpenSubtitles username") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .clickable { }
+                        .padding(vertical = 6.dp, horizontal = 12.dp),
+                )
+                OutlinedTextField(
+                    value = osPassword,
+                    onValueChange = { osPassword = it },
+                    label = { Text("OpenSubtitles password") },
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .clickable { }
+                        .padding(vertical = 6.dp, horizontal = 12.dp),
+                )
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        scope.launch {
+                            osBusy = true
+                            osMessage = null
+                            val result = SubtitleSearch.openSubtitlesLogin(osUser, osPassword)
+                            osBusy = false
+                            result.onSuccess { session ->
+                                settings.openSubtitlesToken = session.token
+                                settings.openSubtitlesTokenExpires =
+                                    System.currentTimeMillis() + 23 * 60 * 60 * 1000L
+                                settings.openSubtitlesUser = session.username
+                                osUser = session.username
+                                osPassword = ""
+                                osMessage = "Signed in as ${session.username}"
+                            }.onFailure { osMessage = it.message ?: "Sign-in failed" }
+                        }
+                    },
+                    enabled = !osBusy,
+                ) { Text(if (osBusy) "Signing in…" else "Sign in to OpenSubtitles") }
+                Text(
+                    "Search works without an account; OpenSubtitles requires this free login " +
+                        "before it hands out downloads. The password is not saved — only the " +
+                        "24 hour token it returns.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 14.dp, top = 6.dp, bottom = 8.dp),
+                )
+            }
+            osMessage?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 14.dp, bottom = 6.dp),
+                )
+            }
+        }
+
+        else -> Text(
+            "Subtitle search is off. Subtitle files saved next to a download and the source's " +
+                "own tracks still work.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
+        )
+    }
+
     OutlinedTextField(
         value = settings.subtitleSearchLanguage,
         onValueChange = { settings.subtitleSearchLanguage = it },
@@ -455,8 +574,7 @@ fun PlayerSettings(
             .padding(vertical = 6.dp, horizontal = 12.dp),
     )
     Text(
-        "Subtitle search needs a free SubDL API key; the player's subtitle menu then lists " +
-            "what the service has for the episode.",
+        "The player's subtitle menu then lists what the service has for the episode.",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
         modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),

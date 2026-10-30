@@ -52,6 +52,7 @@ object Tracking {
                 when (provider) {
                     TrackingProvider.AniList -> pushAniList(token, title, season, episode, finished)
                     TrackingProvider.MyAnimeList -> pushMal(token, title, season, episode, finished)
+                    TrackingProvider.Simkl -> pushSimkl(token, account.clientId, title, season, episode)
                 }
             }
         }
@@ -88,6 +89,16 @@ object Tracking {
                             body = Accounts.formEncode(mapOf("status" to "plan_to_watch")),
                             contentType = "application/x-www-form-urlencoded",
                             headers = mapOf("Authorization" to "Bearer $token"),
+                        )
+                    }
+                    TrackingProvider.Simkl -> {
+                        val id = simklId(token, account.clientId, title, isShow = true) ?: return@runCatching
+                        Http.send(
+                            method = "POST",
+                            url = "https://api.simkl.com/sync/add-to-list",
+                            body = "{\"shows\":[{\"ids\":{\"simkl\":$id},\"to\":\"plantowatch\"}]}",
+                            contentType = "application/json",
+                            headers = simklHeaders(token, account.clientId),
                         )
                     }
                 }
@@ -191,6 +202,69 @@ object Tracking {
             ?.firstOrNull()?.jsonObject
             ?.get("node")?.jsonObject
             ?.get("id")?.jsonPrimitive?.intOrNull
+    }.getOrNull()
+
+    // ------------------------------------------------------------------ Simkl
+
+    private fun simklHeaders(token: String, clientId: String) = mapOf(
+        "simkl-api-key" to clientId,
+        "Authorization" to "Bearer $token",
+        "Content-Type" to "application/json",
+    )
+
+    /** Marks an episode watched in Simkl's history, or the movie when there is no episode. */
+    private suspend fun pushSimkl(
+        token: String,
+        clientId: String,
+        title: String,
+        season: Int?,
+        episode: Int?,
+    ) {
+        if (clientId.isBlank()) return
+        val isShow = episode != null
+        val id = simklId(token, clientId, title, isShow) ?: return
+        val body = if (isShow) {
+            val seasonNumber = season?.takeIf { it > 0 } ?: 1
+            "{\"shows\":[{\"ids\":{\"simkl\":$id},\"seasons\":[{\"number\":$seasonNumber," +
+                "\"episodes\":[{\"number\":$episode}]}]}]}"
+        } else {
+            "{\"movies\":[{\"ids\":{\"simkl\":$id}}]}"
+        }
+        Http.send(
+            method = "POST",
+            url = "https://api.simkl.com/sync/history",
+            body = body,
+            contentType = "application/json",
+            headers = simklHeaders(token, clientId),
+        )
+    }
+
+    private suspend fun simklId(
+        token: String,
+        clientId: String,
+        title: String,
+        isShow: Boolean,
+    ): Int? {
+        val key = cacheKey(TrackingProvider.Simkl, title)
+        mediaIds[key]?.let { return it }
+        val type = if (isShow) "show" else "movie"
+        val query = java.net.URLEncoder.encode(title, Charsets.UTF_8)
+        val body = runCatching {
+            Http.send(
+                method = "GET",
+                url = "https://api.simkl.com/search/$type?q=$query&client_id=$clientId",
+                headers = mapOf("simkl-api-key" to clientId, "Authorization" to "Bearer $token"),
+            )
+        }.getOrNull() ?: return null
+        val id = parseSimklId(body) ?: return null
+        mediaIds[key] = id
+        return id
+    }
+
+    internal fun parseSimklId(body: String): Int? = runCatching {
+        Json.parseToJsonElement(body).jsonArray.firstOrNull()?.jsonObject
+            ?.get("ids")?.jsonObject
+            ?.get("simkl")?.jsonPrimitive?.intOrNull
     }.getOrNull()
 
     /** The entry's current progress, used by tests and by the "already synced" status text. */
