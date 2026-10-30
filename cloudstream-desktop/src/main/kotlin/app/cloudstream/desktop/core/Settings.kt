@@ -95,6 +95,21 @@ class Settings {
         get() = get("player.osUser", "")
         set(value) = set("player.osUser", value.trim())
 
+    /** Torrent links are played through aria2c; off stops them being offered at all. */
+    var torrentEnabled: Boolean
+        get() = getBool("player.torrent", true)
+        set(value) = set("player.torrent", value.toString())
+
+    /** Where aria2c lives when it is not on PATH; a folder is accepted too. */
+    var aria2Path: String
+        get() = get("player.aria2Path", "")
+        set(value) = set("player.aria2Path", value.trim())
+
+    /** Folder torrent data is fetched into; it doubles as the streaming cache. */
+    var torrentDir: String
+        get() = get("player.torrentDir", TorrentEngine.defaultDir())
+        set(value) = set("player.torrentDir", value.trim())
+
     /** Push watched episodes and bookmarks to the linked AniList/MyAnimeList account. */
     var trackSync: Boolean
         get() = getBool("accounts.sync", true)

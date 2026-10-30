@@ -63,6 +63,7 @@ import app.cloudstream.desktop.core.SubtitleHit
 import app.cloudstream.desktop.core.SubtitleOption
 import app.cloudstream.desktop.core.SubtitleSearch
 import app.cloudstream.desktop.core.Subtitles
+import app.cloudstream.desktop.core.TorrentEngine
 import app.cloudstream.desktop.core.Tracking
 import app.cloudstream.desktop.core.WatchProgress
 import app.cloudstream.desktop.core.WatchRecord
@@ -142,7 +143,11 @@ fun PlayerScreen(
     val engineReady = video != null
 
     DisposableEffect(video) {
-        onDispose { runCatching { video?.release() } }
+        onDispose {
+            // The bridge and its aria2 processes only exist for as long as the player does.
+            TorrentEngine.stopAll()
+            runCatching { video?.release() }
+        }
     }
 
     /** The player's current episode, as the library stores it. */
@@ -221,6 +226,30 @@ fun PlayerScreen(
             return
         }
 
+        // A magnet cannot be handed to VLC: aria2 fetches it and a local bridge serves it.
+        val playableUrl = if (TorrentEngine.isTorrentUrl(stream.url)) {
+            if (!settings.torrentEnabled) {
+                loading = false
+                error = "Torrent playback is off (Settings → Player)"
+                return
+            }
+            onStatus("Starting torrent…")
+            val local = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    TorrentEngine.prepare(stream.url, settings.torrentDir, settings.aria2Path)
+                }.getOrNull()
+            }
+            if (local == null) {
+                loading = false
+                error = TorrentEngine.unavailableMessage(settings.aria2Path)
+                    ?: "The torrent did not start"
+                return
+            }
+            local
+        } else {
+            stream.url
+        }
+
         // Subtitles that sit next to a downloaded file come first, then the source's tracks.
         val sidecars = Subtitles.localPathOf(stream.url)
             ?.let { Subtitles.sidecarsFor(it) }
@@ -249,7 +278,7 @@ fun PlayerScreen(
                     "at ${ResumePolicy.formatTime(resumeMs)}",
             )
         }
-        player.media().play(stream.url, *options.toTypedArray())
+        player.media().play(playableUrl, *options.toTypedArray())
     }
 
     LaunchedEffect(video, index) {

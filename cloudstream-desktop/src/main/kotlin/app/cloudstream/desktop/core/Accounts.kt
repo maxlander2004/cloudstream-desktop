@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -55,12 +56,22 @@ enum class TrackingProvider(
         description = "Anime, TV and movies. Simkl's PIN flow needs only a client ID: create an app " +
             "at simkl.com/settings/developer and paste its client ID below.",
         registerUrl = "https://simkl.com/settings/developer",
+    ),
+    Kitsu(
+        id = "kitsu",
+        label = "Kitsu",
+        description = "Anime lists. Kitsu accepts the email and password on your own account " +
+            "directly, so there is no app to register and no code to copy.",
+        registerUrl = "https://kitsu.app",
     );
 
     val redirectUrl: String get() = "http://127.0.0.1:${Accounts.PORT}/$id"
 
     /** Simkl uses a PIN instead of a redirect, so it never touches the loopback listener. */
     val usesPin: Boolean get() = this == Simkl
+
+    /** Kitsu signs in with the account's own email and password. */
+    val usesPassword: Boolean get() = this == Kitsu
 
     companion object {
         fun of(id: String?): TrackingProvider? = entries.firstOrNull { it.id == id }
@@ -176,6 +187,8 @@ object Accounts {
                     TrackingProvider.MyAnimeList -> malAccount(payload, trimmed, verifier!!)
                     TrackingProvider.Simkl ->
                         error("Simkl signs in with a PIN — use startPin and completePin")
+                    TrackingProvider.Kitsu ->
+                        error("Kitsu signs in with an email and password — use kitsuLogin")
                 }
             } finally {
                 server.stop()
@@ -207,6 +220,7 @@ object Accounts {
             append("&redirect_uri=").append(enc(provider.redirectUrl))
         }
         TrackingProvider.Simkl -> error("Simkl signs in with a PIN, not a redirect")
+        TrackingProvider.Kitsu -> error("Kitsu signs in with an email and password, not a redirect")
     }
 
     private suspend fun aniListAccount(payload: String, clientId: String): LinkedAccount {
@@ -278,36 +292,122 @@ object Accounts {
     suspend fun token(account: LinkedAccount): String? {
         val expiry = account.expiresAt
         if (expiry == 0L || expiry - 60_000 > System.currentTimeMillis()) return account.accessToken
-        val refresh = account.refreshToken ?: return null
         val provider = TrackingProvider.of(account.provider) ?: return null
-        if (provider != TrackingProvider.MyAnimeList || account.clientId.isBlank()) return null
+        return when (provider) {
+            TrackingProvider.MyAnimeList -> refreshMal(account)
+            TrackingProvider.Kitsu -> refreshKitsu(account)
+            else -> null
+        }
+    }
 
-        return runCatching {
-            val body = formEncode(
+    private suspend fun refreshMal(account: LinkedAccount): String? = runCatching {
+        val refresh = account.refreshToken ?: return@runCatching null
+        if (account.clientId.isBlank()) return@runCatching null
+        val response = Http.send(
+            method = "POST",
+            url = "https://myanimelist.net/v1/oauth2/token",
+            body = formEncode(
                 mapOf(
                     "client_id" to account.clientId,
                     "grant_type" to "refresh_token",
                     "refresh_token" to refresh,
                 ),
+            ),
+            contentType = "application/x-www-form-urlencoded",
+        )
+        val parsed = Json.parseToJsonElement(response).jsonObject
+        val access = parsed["access_token"]?.jsonPrimitive?.contentOrNull ?: return@runCatching null
+        val expiresIn = parsed["expires_in"]?.jsonPrimitive?.intOrNull ?: 0
+        val updated = account.copy(
+            accessToken = access,
+            refreshToken = parsed["refresh_token"]?.jsonPrimitive?.contentOrNull ?: refresh,
+            expiresAt = if (expiresIn > 0) System.currentTimeMillis() + expiresIn * 1000L else 0,
+        )
+        save(updated)
+        access
+    }.getOrNull()
+
+    private suspend fun refreshKitsu(account: LinkedAccount): String? = runCatching {
+        val refresh = account.refreshToken ?: return@runCatching null
+        val response = Http.send(
+            method = "POST",
+            url = "https://kitsu.io/api/oauth/token",
+            body = formEncode(mapOf("grant_type" to "refresh_token", "refresh_token" to refresh)),
+            contentType = "application/x-www-form-urlencoded",
+        )
+        val token = parseKitsuToken(response) ?: return@runCatching null
+        val updated = account.copy(
+            accessToken = token.access,
+            refreshToken = token.refresh ?: refresh,
+            expiresAt = if (token.expiresIn > 0) System.currentTimeMillis() + token.expiresIn * 1000L else 0,
+        )
+        save(updated)
+        token.access
+    }.getOrNull()
+
+    // ------------------------------------------------------------------ Kitsu
+
+    data class KitsuToken(val access: String, val refresh: String?, val expiresIn: Int)
+
+    /**
+     * Kitsu's password grant takes no client credentials — the account's own login is enough,
+     * which is why this provider needs no app registration step at all.
+     */
+    suspend fun kitsuLogin(email: String, password: String): Result<LinkedAccount> = runCatching {
+        val user = email.trim()
+        require(user.isNotEmpty() && password.isNotEmpty()) { "Enter your Kitsu email and password" }
+        val response = Http.send(
+            method = "POST",
+            url = "https://kitsu.io/api/oauth/token",
+            body = formEncode(
+                mapOf(
+                    "grant_type" to "password",
+                    "username" to user,
+                    "password" to password,
+                ),
+            ),
+            contentType = "application/x-www-form-urlencoded",
+        )
+        val token = parseKitsuToken(response) ?: error("Kitsu returned no access token")
+
+        val profile = runCatching {
+            Http.send(
+                method = "GET",
+                url = "https://kitsu.io/api/edge/users?filter[self]=true",
+                headers = mapOf(
+                    "Authorization" to "Bearer ${token.access}",
+                    "Accept" to "application/vnd.api+json",
+                ),
             )
-            val response = Http.send(
-                method = "POST",
-                url = "https://myanimelist.net/v1/oauth2/token",
-                body = body,
-                contentType = "application/x-www-form-urlencoded",
-            )
-            val parsed = Json.parseToJsonElement(response).jsonObject
-            val access = parsed["access_token"]?.jsonPrimitive?.contentOrNull ?: return@runCatching null
-            val expiresIn = parsed["expires_in"]?.jsonPrimitive?.intOrNull ?: 0
-            val updated = account.copy(
-                accessToken = access,
-                refreshToken = parsed["refresh_token"]?.jsonPrimitive?.contentOrNull ?: refresh,
-                expiresAt = if (expiresIn > 0) System.currentTimeMillis() + expiresIn * 1000L else 0,
-            )
-            save(updated)
-            access
-        }.getOrNull()
-    }
+        }.getOrNull().orEmpty()
+        val identity = parseKitsuUser(profile)
+
+        LinkedAccount(
+            provider = TrackingProvider.Kitsu.id,
+            userId = identity?.first.orEmpty(),
+            username = identity?.second.orEmpty().ifBlank { user.substringBefore('@') },
+            accessToken = token.access,
+            refreshToken = token.refresh,
+            expiresAt = if (token.expiresIn > 0) System.currentTimeMillis() + token.expiresIn * 1000L else 0,
+        )
+    }.onSuccess { save(it) }
+
+    internal fun parseKitsuToken(body: String): KitsuToken? = runCatching {
+        val root = Json.parseToJsonElement(body).jsonObject
+        val access = root["access_token"]?.jsonPrimitive?.contentOrNull ?: return@runCatching null
+        KitsuToken(
+            access = access,
+            refresh = root["refresh_token"]?.jsonPrimitive?.contentOrNull,
+            expiresIn = root["expires_in"]?.jsonPrimitive?.intOrNull ?: 0,
+        )
+    }.getOrNull()
+
+    internal fun parseKitsuUser(body: String): Pair<String, String>? = runCatching {
+        val user = Json.parseToJsonElement(body).jsonObject["data"]?.jsonArray
+            ?.firstOrNull()?.jsonObject ?: return@runCatching null
+        val id = user["id"]?.jsonPrimitive?.contentOrNull ?: return@runCatching null
+        id to user["attributes"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
+    }.getOrNull()
 
     // ------------------------------------------------------------------ Simkl PIN
 

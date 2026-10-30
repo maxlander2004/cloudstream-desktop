@@ -107,7 +107,8 @@ fun isStreamPlaylist(url: String): Boolean {
  * playlist the first link is still returned, so the queue keeps working for those sources.
  */
 fun List<StreamLink>.bestDownloadLink(): StreamLink? =
-    firstOrNull { !isStreamPlaylist(it.url) } ?: firstOrNull()
+    firstOrNull { !isStreamPlaylist(it.url) && !TorrentEngine.isTorrentUrl(it.url) }
+        ?: firstOrNull { !TorrentEngine.isTorrentUrl(it.url) }
 
 /**
  * Resume rules, matching the original: a saved position in the middle of an episode resumes,

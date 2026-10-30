@@ -63,6 +63,7 @@ import app.cloudstream.desktop.core.Doh
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.Settings
 import app.cloudstream.desktop.core.SubtitleSearch
+import app.cloudstream.desktop.core.TorrentEngine
 import app.cloudstream.desktop.core.TrackingProvider
 import app.cloudstream.desktop.core.UpdateCheck
 import kotlinx.coroutines.Dispatchers
@@ -575,6 +576,46 @@ fun PlayerSettings(
     )
     Text(
         "The player's subtitle menu then lists what the service has for the episode.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
+    )
+
+    SectionLabel("Torrent streaming")
+    SwitchRow(
+        title = "Play torrent links",
+        subtitle = TorrentEngine.status(settings.aria2Path),
+        checked = settings.torrentEnabled,
+        onCheckedChange = { settings.torrentEnabled = it },
+    )
+    OutlinedTextField(
+        value = settings.aria2Path,
+        onValueChange = { settings.aria2Path = it },
+        label = { Text("aria2c path (optional)") },
+        placeholder = { Text("/usr/bin/aria2c") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    OutlinedTextField(
+        value = settings.torrentDir,
+        onValueChange = { settings.torrentDir = it },
+        label = { Text("Torrent data folder") },
+        singleLine = true,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { }
+            .padding(vertical = 6.dp, horizontal = 12.dp),
+    )
+    Text(
+        "Torrent links are fetched by aria2c and streamed to the player over localhost. " +
+            "Without aria2c installed, torrent providers can list content but cannot play it.",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
         modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 8.dp),
@@ -1111,7 +1152,141 @@ fun AccountsSettings(
             }
         }
 
-        if (account == null) {
+        if (account == null && provider.usesPassword) {
+            var email by remember(provider) { mutableStateOf("") }
+            var password by remember(provider) { mutableStateOf("") }
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = email,
+                onValueChange = { email = it },
+                label = { Text("${provider.label} email") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(vertical = 4.dp),
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("${provider.label} password") },
+                singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(vertical = 4.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(provider.description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            Spacer(Modifier.height(6.dp))
+            Button(
+                onClick = {
+                    if (email.isBlank() || password.isBlank()) {
+                        onStatus("Enter your ${provider.label} email and password first")
+                        return@Button
+                    }
+                    scope.launch {
+                        linking = provider.id
+                        onStatus("Signing in to ${provider.label}…")
+                        val result = Accounts.kitsuLogin(email, password)
+                        linking = null
+                        result.onSuccess {
+                            password = ""
+                            onStatus("Signed in to ${provider.label} as ${it.username}")
+                        }.onFailure {
+                            onStatus("${provider.label} sign-in failed: ${it.message}")
+                        }
+                    }
+                },
+                enabled = linking == null,
+            ) { Text("Sign in") }
+        }
+
+        if (account == null && provider.usesPin) {
+            var pin by remember(provider) { mutableStateOf<Accounts.PinLogin?>(null) }
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = clientIds[provider.id].orEmpty(),
+                onValueChange = { value -> clientIds = clientIds + (provider.id to value) },
+                label = { Text("${provider.label} client ID") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(vertical = 4.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(provider.description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = {
+                        val id = clientIds[provider.id].orEmpty().trim()
+                        if (id.isEmpty()) {
+                            onStatus("Enter your ${provider.label} client ID first")
+                            return@Button
+                        }
+                        scope.launch {
+                            linking = provider.id
+                            val started = Accounts.startPin(id)
+                            linking = null
+                            started.onSuccess { value ->
+                                pin = value
+                                runCatching {
+                                    Desktop.getDesktop().browse(java.net.URI(value.verificationUrl))
+                                }
+                                onStatus(
+                                    "Enter the PIN ${value.userCode} on ${provider.label}, then press Finish",
+                                )
+                            }.onFailure {
+                                onStatus("${provider.label} sign-in failed: ${it.message}")
+                            }
+                        }
+                    },
+                    enabled = linking == null,
+                ) { Text("Get PIN") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = {
+                        runCatching { Desktop.getDesktop().browse(java.net.URI(provider.registerUrl)) }
+                        onStatus("Opened ${provider.label} app settings in your browser")
+                    },
+                ) { Text("Create an app") }
+            }
+            pin?.let { value ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "PIN ${value.userCode}",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        val id = clientIds[provider.id].orEmpty().trim()
+                        scope.launch {
+                            linking = provider.id
+                            onStatus("Waiting for ${provider.label} authorization…")
+                            val result = Accounts.completePin(id, value)
+                            linking = null
+                            result.onSuccess {
+                                pin = null
+                                onStatus("Signed in to ${provider.label} as ${it.username}")
+                            }.onFailure {
+                                onStatus("${provider.label} sign-in failed: ${it.message}")
+                            }
+                        }
+                    },
+                    enabled = linking == null,
+                ) { Text(if (linking == provider.id) "Waiting…" else "Finish sign-in") }
+            }
+        }
+
+        if (account == null && !provider.usesPassword && !provider.usesPin) {
             Spacer(Modifier.height(6.dp))
             OutlinedTextField(
                 value = clientIds[provider.id].orEmpty(),
