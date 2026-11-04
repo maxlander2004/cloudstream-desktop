@@ -37,6 +37,9 @@ dependencies {
     // already what CloudStream's own HTTP stack uses; this pins the same version.
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.3")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    // Extensions reach for gson directly (parsing many site APIs); the desktop host has to
+    // expose it on the classpath they link against, exactly like the Android app does.
+    implementation("com.google.code.gson:gson:2.11.0")
     implementation(compose.desktop.currentOs)
     // Must match the Compose Multiplatform version above: material3 1.7.3 was built against
     // foundation-layout 1.7.3, and Gradle upgrades foundation-layout to 1.12.0 in the packaged

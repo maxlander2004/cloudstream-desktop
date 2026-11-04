@@ -1,8 +1,11 @@
 package app.cloudstream.desktop.core.legacy
 
+import android.content.Context
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.plugins.BasePlugin
+import com.lagradost.cloudstream3.plugins.Plugin
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -122,7 +125,7 @@ object LegacyExtensions {
 
         plugin.filename = archive.toAbsolutePath().toString()
         try {
-            plugin.load()
+            loadPlugin(plugin, CloudStreamApp.context ?: Context())
         } catch (t: Throwable) {
             throw IllegalStateException(
                 "${manifest.name ?: manifest.pluginClassName} failed to load: ${t.message ?: t::class.simpleName}",
@@ -138,6 +141,18 @@ object LegacyExtensions {
         synchronized(loaded) { loaded += Loaded(plugin, added, loader) }
 
         return LegacyLoad(manifest, added, loader)
+    }
+
+    /**
+     * Runs a plugin's entry point exactly like `PluginManager.loadPlugin` does.
+     *
+     * A `Plugin` gets `load(context)`, whose default calls the cross-platform `load()`, so both
+     * generations of extension work. Extensions built against the current plugin API override
+     * only `load(context)`; calling the plain `load()` on those runs the base class's no-op, the
+     * plugin registers no providers and it looks installed-but-broken in the UI.
+     */
+    internal fun loadPlugin(plugin: BasePlugin, context: Context) {
+        if (plugin is Plugin) plugin.load(context) else plugin.load()
     }
 
     private fun identitySetOf(providers: List<MainAPI>): Set<MainAPI> =

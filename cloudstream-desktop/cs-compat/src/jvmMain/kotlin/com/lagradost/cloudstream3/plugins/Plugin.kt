@@ -1,14 +1,41 @@
 package com.lagradost.cloudstream3.plugins
 
+import android.content.Context
+import android.content.res.Resources
+
 /**
- * The plugin base class older extensions were compiled against, before the current
- * [BasePlugin] name.
+ * Upstream's `Plugin` base class, as extensions are compiled against it.
  *
- * Archives built against that API extend `Plugin` directly, so the class has to exist for
- * their plugin entry point to load — otherwise the JVM fails with
- * `NoClassDefFoundError: com/lagradost/cloudstream3/plugins/Plugin`. Extending [BasePlugin]
- * keeps `registerMainAPI`, `load`, `beforeUnload` and `filename` available exactly as the old
- * extensions use them, and makes them valid plugins for the desktop loader.
+ * On Android this class lives in the app module, so it is not part of the `library` sources
+ * that [com.lagradost.cloudstream3.plugins.BasePlugin] comes from; the desktop host has to
+ * provide it for archives whose plugin class extends `Plugin` instead of `BasePlugin`.
+ *
+ * `load(context)` is the current entry point — `PluginManager.loadPlugin` calls it for every
+ * `Plugin` instance and it falls back to the cross-platform `load()`. Reproducing that fallback
+ * is what makes both generations of extensions work: newer archives override `load(context)`,
+ * older ones override `load()`. Without the overload the newer ones load, register nothing and
+ * look installed-but-broken.
  */
-@Deprecated("Extensions are built against BasePlugin now; this exists for older archives.")
-abstract class Plugin : BasePlugin()
+abstract class Plugin : BasePlugin() {
+    /**
+     * Called when the plugin is loaded.
+     *
+     * The default calls [load], so a plugin written against whichever API existed when it was
+     * built is initialised either way.
+     */
+    @Throws(Throwable::class)
+    open fun load(context: Context) {
+        load()
+    }
+
+    /**
+     * Populated when the archive's `manifest.json` sets `requiresResources`.
+     *
+     * The desktop host has no Android asset manager, so this is an empty resource set: enough
+     * for a plugin that merely holds the reference, not for one that reads APK resources.
+     */
+    var resources: Resources? = null
+
+    /** Upstream's hook for a plugin-supplied settings screen; nothing shows it here. */
+    var openSettings: ((context: Context) -> Unit)? = null
+}
