@@ -60,7 +60,6 @@ fun main() = runBlocking {
         failures++
     }
 
-    val before = APIHolder.allProviders.size
     for (provider in load.providers) {
         // A provider that linked is a MainAPI instance whose own class resolved; if the ABI had
         // moved, the class loader would have thrown before reaching here.
@@ -76,15 +75,15 @@ fun main() = runBlocking {
             println("    FAILED: the provider lost its mainUrl")
             failures++
         }
-    }
 
-    // Provider registration is the observable outcome of the plugin's own load() running.
-    if (APIHolder.allProviders.size != before + load.providers.size) {
-        println(
-            "FAILED: registry went $before -> ${APIHolder.allProviders.size} " +
-                "for ${load.providers.size} providers",
-        )
-        failures++
+        // Registration is the observable outcome of the plugin's own load() running, and what
+        // makes the source appear in the app at all. Checked by identity rather than by
+        // counting: `load()` registers while it runs, so a size delta around the call is not a
+        // measurement of anything.
+        if (APIHolder.allProviders.none { it === provider }) {
+            println("    FAILED: the provider never reached APIHolder.allProviders")
+            failures++
+        }
     }
 
     println("=".repeat(78))
