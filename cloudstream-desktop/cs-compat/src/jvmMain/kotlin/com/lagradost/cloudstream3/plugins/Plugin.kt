@@ -38,4 +38,29 @@ abstract class Plugin : BasePlugin() {
 
     /** Upstream's hook for a plugin-supplied settings screen; nothing shows it here. */
     var openSettings: ((context: Context) -> Unit)? = null
+
+    /**
+     * Registers a playback action supplied by this plugin, like `Plugin.registerVideoClickAction`.
+     *
+     * The action is stored with the plugin's path so the host can attribute it. The desktop
+     * player does not offer plugin actions yet — registering one is accepted and kept, so a
+     * plugin that adds a cast receiver still loads and can be listed later.
+     */
+    fun registerVideoClickAction(element: com.lagradost.cloudstream3.actions.VideoClickAction) {
+        element.sourcePlugin = filename
+        com.lagradost.cloudstream3.actions.VideoClickActionHolder.allVideoClickActions.add(element)
+    }
+
+    companion object {
+        /**
+         * Compose's stability marker.
+         *
+         * Archives built with the Compose compiler read `$stable` off the classes it visited,
+         * including this one; without the field the plugin dies with
+         * `NoSuchFieldError: Class ... Plugin does not have member field 'int $stable'` before
+         * it can register anything. The value is irrelevant to non-Compose code.
+         */
+        @JvmField
+        val `$stable`: Int = 0
+    }
 }

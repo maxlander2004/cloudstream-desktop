@@ -28,7 +28,21 @@ open class Context {
 
     open fun getResources(): android.content.res.Resources = android.content.res.Resources()
 
-    open fun getApplicationContext(): Context = this
+    /**
+     * The host has no resource table of its own and an extension's strings live in its archive,
+     * so every lookup is empty — what an unresolvable id gives upstream.
+     */
+    open fun getString(resId: Int): String = ""
+
+    open fun getString(resId: Int, vararg formatArgs: Any?): String = ""
+
+    open fun getText(resId: Int): CharSequence = ""
+
+    /**
+     * The process-wide application, like Android. Extension helpers cast this to
+     * `android.app.Application`, so it has to be one rather than the context itself.
+     */
+    open fun getApplicationContext(): Context = android.app.Application.instance
 
     /** No activity exists to start; a plugin that opens a browser does so through the app. */
     open fun startActivity(intent: Intent) = Unit
@@ -39,8 +53,43 @@ open class Context {
 
     open fun getCacheDir(): java.io.File = dataDir().resolve("cache").toFile()
 
+    /** The desktop app is always installed; extensions that check this find it true. */
+    open fun getApplicationInfo(): android.content.pm.ApplicationInfo =
+        android.content.pm.ApplicationInfo()
+
+    /** One manager per context, like Android hands out the same service object every call. */
+    private val packageManagerInstance by lazy { android.content.pm.PackageManager() }
+    private val contentResolverInstance by lazy { ContentResolver() }
+    private val activityManagerInstance by lazy { android.app.ActivityManager() }
+    private val connectivityManagerInstance by lazy { android.net.ConnectivityManager() }
+
+    /**
+     * The desktop has no package installer, so this answers for the host app only — see
+     * [android.content.pm.PackageManager].
+     */
+    open fun getPackageManager(): android.content.pm.PackageManager = packageManagerInstance
+
+    open fun getContentResolver(): ContentResolver = contentResolverInstance
+
+    open fun getSystemService(name: String?): Any? = when (name) {
+        ACTIVITY_SERVICE -> activityManagerInstance
+        CONNECTIVITY_SERVICE -> connectivityManagerInstance
+        else -> null
+    }
+
     internal companion object {
         fun dataDir(): Path = Paths.get(System.getProperty("user.home"), ".cloudstream-desktop")
+
+        /** The `getSystemService` names extensions pass; only these two resolve. */
+        const val ACTIVITY_SERVICE = "activity"
+        const val CONNECTIVITY_SERVICE = "connectivity"
+        const val WIFI_SERVICE = "wifi"
+
+        const val MODE_PRIVATE = 0
+        const val MODE_WORLD_READABLE = 1
+        const val MODE_WORLD_WRITEABLE = 2
+        const val MODE_APPEND = 0x8000
+        const val MODE_MULTI_PROCESS = 4
     }
 }
 

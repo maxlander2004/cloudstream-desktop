@@ -268,10 +268,16 @@ object ExtensionRepository {
     }
 
     /**
-     * Downloads an extension into the extensions folder as `<internalName>.cs3`. The size and
-     * hash published by the repository are verified before the file is moved in place, so a
-     * tampered or truncated download fails instead of being installed. Installing again with a
-     * higher [RepositoryPlugin.version] is an update.
+     * Downloads an extension into the extensions folder as `<internalName>.cs3`. The hash
+     * published by the repository is verified before the file is moved in place, so a tampered
+     * or truncated download fails instead of being installed. Installing again with a higher
+     * [RepositoryPlugin.version] is an update.
+     *
+     * Only the published hash is verified. Upstream does the same (`ApkUpdater.transfer`
+     * compares the digest and uses `fileSize` purely as a progress hint), and repositories
+     * rebuild their files without bumping `fileSize` — in both directions — so the size is not
+     * evidence of a good or bad download. A download that is not an extension at all is caught
+     * by the caller, which loads the copy and deletes it if it does not load.
      */
     suspend fun install(plugin: RepositoryPlugin, extensionsDir: Path): Path {
         Files.createDirectories(extensionsDir)
@@ -280,11 +286,6 @@ object ExtensionRepository {
             val bytes = Http.getBytes(plugin.url)
             Files.write(temp, bytes)
 
-            plugin.fileSize?.let { expected ->
-                check(bytes.size.toLong() == expected) {
-                    "size mismatch: got ${bytes.size} bytes, repository says $expected"
-                }
-            }
             plugin.fileHash?.let { expected ->
                 val actual = sha256(temp)
                 check(actual.equals(expected, ignoreCase = true)) {

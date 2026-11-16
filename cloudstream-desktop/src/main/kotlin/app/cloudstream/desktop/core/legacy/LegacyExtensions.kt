@@ -2,8 +2,9 @@ package app.cloudstream.desktop.core.legacy
 
 import android.content.Context
 import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import kotlinx.serialization.SerialName
@@ -44,6 +45,13 @@ data class LegacyLoad(
  * JVM build of upstream's own `library` module (see the `:cs-compat` project).
  */
 object LegacyExtensions {
+    /**
+     * The context extensions receive. The desktop host has no activity, so this is the stand-in
+     * the loader already hands to `Plugin.loadPlugin`; a plugin that opens a screen with it is
+     * a no-op rather than a crash.
+     */
+    internal fun context(): Context = CommonActivity.activity ?: Context()
+
     private val json = Json { ignoreUnknownKeys = true }
 
     fun looksLikeLegacy(file: Path): Boolean {
@@ -62,8 +70,10 @@ object LegacyExtensions {
     }
 
     private class Loaded(
+        val archive: Path,
         val plugin: BasePlugin,
-        val providers: List<MainAPI>,
+        /** Providers this plugin contributed; grows if it registers during the batch event. */
+        val providers: MutableList<MainAPI>,
         val loader: ClassLoader,
     )
 
@@ -80,6 +90,9 @@ object LegacyExtensions {
             for (entry in loaded) {
                 runCatching { entry.plugin.beforeUnload() }
                 APIHolder.allProviders.removeAll(entry.providers)
+                // Providers the plugin added from the batch event are not in that list; they are
+                // recognisable by the class loader that defined them.
+                APIHolder.allProviders.removeAll { it::class.java.classLoader === entry.loader }
                 // Release the translated archive too: on Windows an open jar cannot be
                 // deleted, which would break uninstall and in-place updates.
                 runCatching { (entry.loader as? URLClassLoader)?.close() }
@@ -125,7 +138,7 @@ object LegacyExtensions {
 
         plugin.filename = archive.toAbsolutePath().toString()
         try {
-            loadPlugin(plugin, CloudStreamApp.context ?: Context())
+            loadPlugin(plugin, CommonActivity.activity ?: Context())
         } catch (t: Throwable) {
             throw IllegalStateException(
                 "${manifest.name ?: manifest.pluginClassName} failed to load: ${t.message ?: t::class.simpleName}",
@@ -134,13 +147,47 @@ object LegacyExtensions {
         }
 
         val added = APIHolder.allProviders.filter { provider -> !before.contains(provider) }
-        require(added.isNotEmpty()) {
-            "${manifest.name ?: manifest.pluginClassName} loaded but registered no providers"
-        }
 
-        synchronized(loaded) { loaded += Loaded(plugin, added, loader) }
+        // A plugin that registers nothing is not an error: upstream plugins may contribute only
+        // extractors, video-click actions or a settings screen, and some register their
+        // providers from `MainActivity.afterPluginsLoadedEvent` instead of from `load()`.
+        synchronized(loaded) { loaded += Loaded(archive, plugin, added.toMutableList(), loader) }
 
         return LegacyLoad(manifest, added, loader)
+    }
+
+    /**
+     * Fires `MainActivity.afterPluginsLoadedEvent`, like `PluginManager.mainPluginsLoaded`.
+     *
+     * Upstream fires it once per batch, after every plugin in the batch is registered. The
+     * desktop loads archives one at a time, so the host calls this after its own load loop
+     * (`ExtensionHost.reload`). Plugins that subscribe to it — a handful register their
+     * providers there rather than in `load()` — would otherwise never run.
+     */
+    fun notifyPluginsLoaded() {
+        if (synchronized(loaded) { loaded.isEmpty() }) return
+        runCatching { MainActivity.afterPluginsLoadedEvent.invoke(false) }
+
+        // Subscribers register providers while the event runs; give each new provider to the
+        // plugin whose class loader defined it, so the UI lists it and unload removes it.
+        synchronized(loaded) {
+            val known = identitySetOf(loaded.flatMap { it.providers })
+            for (provider in APIHolder.allProviders) {
+                if (known.contains(provider)) continue
+                val owner = loaded.firstOrNull { it.loader === provider::class.java.classLoader }
+                owner?.providers?.add(provider)
+            }
+        }
+    }
+
+    /**
+     * The providers one archive contributed, including any it registered from the batch event.
+     *
+     * Call this after [notifyPluginsLoaded]: the whole point of the event is that the set grows
+     * after [load] returned.
+     */
+    fun providersOf(archive: Path): List<MainAPI> = synchronized(loaded) {
+        loaded.firstOrNull { it.archive == archive }?.providers?.toList().orEmpty()
     }
 
     /**

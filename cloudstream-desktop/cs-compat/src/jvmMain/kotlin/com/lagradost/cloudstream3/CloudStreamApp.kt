@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 class CloudStreamApp {
     companion object {
         /** The desktop stand-in for `applicationContext`. */
-        private val desktopContext: Context = object : Context() {}
+        private val desktopContext: Context = android.app.Application.instance
 
         var context: Context? = desktopContext
             private set

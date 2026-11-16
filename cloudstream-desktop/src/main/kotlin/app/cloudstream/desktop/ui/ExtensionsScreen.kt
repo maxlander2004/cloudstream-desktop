@@ -95,6 +95,7 @@ fun ExtensionsScreen(
     onUninstall: (Path) -> Unit,
     onToggleEnabled: (Path, Boolean) -> Unit,
     onStatus: (String) -> Unit,
+    onBack: () -> Unit,
 ) {
     var pane by remember { mutableStateOf(Pane.Repositories) }
     /** Url of the repository whose plugins are listed; null shows the repository list. */
@@ -116,16 +117,20 @@ fun ExtensionsScreen(
             // ---------------------------------------------------------------- top bar
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                if (openRepository != null || pane == Pane.Installed) {
-                    IconButton(
-                        onClick = {
+                // One arrow, like the original's toolbar: it leaves a repository or the
+                // installed list first, and leaves Extensions for the settings list last.
+                IconButton(
+                    onClick = {
+                        if (openRepository != null || pane == Pane.Installed) {
                             openRepository = null
                             pane = Pane.Repositories
                             onQueryChange("")
-                        },
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                        } else {
+                            onBack()
+                        }
+                    },
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
                 Text(
                     title,

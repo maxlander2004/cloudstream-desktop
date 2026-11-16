@@ -10,7 +10,7 @@ import android.content.Intent
 open class Activity : Context() {
     var intent: Intent? = null
 
-    override fun getApplicationContext(): Context = this
+    override fun getApplicationContext(): Context = Application.instance
 
     open fun isFinishing(): Boolean = false
 

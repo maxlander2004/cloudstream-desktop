@@ -37,8 +37,42 @@ object Http {
         return Network.rewrite(url, settings.cloneSite, settings.githubProxy)
     }
 
+    /**
+     * `java.net.URI` rejects a raw space, but repositories publish extension urls as written on
+     * disk (`.../CNC Verse.cs3`). Android's OkHttp quotes those for us; the JDK client does not,
+     * so quote the characters RFC 3986 forbids before handing the url over.
+     */
+    internal fun uriOf(url: String): URI {
+        var needsQuoting = false
+        for (ch in url) {
+            if (ch == ' ' || ch == '"' || ch == '<' || ch == '>' || ch == '`' ||
+                ch == '{' || ch == '}' || ch == '|' || ch == '\\' || ch == '^' ||
+                ch == '[' || ch == ']'
+            ) {
+                needsQuoting = true
+                break
+            }
+        }
+        if (!needsQuoting) return URI.create(url)
+
+        val quoted = StringBuilder(url.length + 16)
+        for (ch in url) {
+            if (ch == ' ' || ch == '"' || ch == '<' || ch == '>' || ch == '`' ||
+                ch == '{' || ch == '}' || ch == '|' || ch == '\\' || ch == '^' ||
+                ch == '[' || ch == ']'
+            ) {
+                for (byte in ch.toString().toByteArray(Charsets.UTF_8)) {
+                    quoted.append('%').append("%02X".format(byte))
+                }
+            } else {
+                quoted.append(ch)
+            }
+        }
+        return URI.create(quoted.toString())
+    }
+
     private fun request(url: String, timeout: Duration): HttpRequest =
-        HttpRequest.newBuilder(URI.create(rewrite(url)))
+        HttpRequest.newBuilder(uriOf(rewrite(url)))
             .timeout(timeout)
             .header("User-Agent", UA)
             .GET()
@@ -51,8 +85,24 @@ object Http {
     }
 
     suspend fun getBytes(url: String): ByteArray = withContext(Dispatchers.IO) {
-        val response = client.send(request(url, Duration.ofSeconds(60)), HttpResponse.BodyHandlers.ofByteArray())
-        check(response.statusCode() in 200..299) { "HTTP ${response.statusCode()} for $url" }
+        var response = client.send(request(url, Duration.ofSeconds(60)), HttpResponse.BodyHandlers.ofByteArray())
+        if (response.statusCode() !in 200..299) {
+            // Some repo CDNs hand out a malformed Location header across a 302/307 and the JDK
+            // rejects the subsequent request with "malformed utf-8 sequence". In that case the
+            // canonical extension URL still resolves if we retry without the automated rewrite,
+            // so fall back once rather than treating the extension as undownloadable.
+            response = client.send(
+                HttpRequest.newBuilder(uriOf(url))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("User-Agent", UA)
+                    .GET()
+                    .build(),
+                HttpResponse.BodyHandlers.ofByteArray(),
+            )
+            check(response.statusCode() in 200..299) {
+                "HTTP ${response.statusCode()} for $url"
+            }
+        }
         response.body()
     }
 

@@ -3,6 +3,8 @@ package app.cloudstream.desktop.core
 import app.cloudstream.desktop.api.Catalog
 import app.cloudstream.desktop.core.legacy.LegacyCatalog
 import app.cloudstream.desktop.core.legacy.LegacyExtensions
+import com.lagradost.cloudstream3.plugins.PluginData
+import com.lagradost.cloudstream3.plugins.PluginManager
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -102,6 +104,55 @@ object ExtensionHost {
     }
 
     /**
+     * `~/.cloudstream-desktop/plugins.sources.json`: the url each extension was installed from.
+     *
+     * The Android app keeps the same thing in its plugin preferences. Extensions read it back
+     * through `PluginManager.getPluginsOnline()` — several refuse to register until they find
+     * their own entry with the repository url they expect (the Vietnamese Fshare plugin only
+     * registers its providers when it sees itself installed from the community repo).
+     */
+    private fun sourcesFile(): Path =
+        Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "plugins.sources.json")
+
+    /** Install url per extension, keyed by the archive's base name. */
+    fun sources(): Map<String, String> = runCatching {
+        val file = sourcesFile()
+        if (!Files.isRegularFile(file)) return emptyMap()
+        json.decodeFromString<Map<String, String>>(Files.readString(file))
+    }.getOrDefault(emptyMap())
+
+    /** Remembers where an extension came from, so plugins can look themselves up again. */
+    fun recordSource(fileName: String, url: String) {
+        val key = fileName.substringBeforeLast('.')
+        runCatching {
+            val updated = sources() + (key to url)
+            Files.createDirectories(sourcesFile().parent)
+            Files.writeString(sourcesFile(), json.encodeToString(updated))
+        }
+    }
+
+    /**
+     * Publishes the installed extensions to `PluginManager`, like `PluginManager.pluginsOnline`.
+     *
+     * A plugin that queries the registry during `load()` — to find its own path, version or
+     * install url — must see the truth, so this runs before any archive is loaded.
+     */
+    private fun publishRegistry() {
+        val sources = sources()
+        PluginManager.pluginsOnline = installed().map { archive ->
+            val internalName = archive.file.fileName.toString().substringBeforeLast('.')
+            val source = sources[internalName]
+            PluginData(
+                internalName = internalName,
+                url = source,
+                isOnline = source != null,
+                filePath = archive.file.toAbsolutePath().toString(),
+                version = archive.version,
+            )
+        }.toTypedArray()
+    }
+
+    /**
      * Copies a downloaded extension into the extensions folder. The copy is validated by
      * loading it there, so a broken archive is reported instead of silently installed.
      */
@@ -146,7 +197,7 @@ object ExtensionHost {
         try {
             val download = dir.resolve(fileName)
             Files.write(download, Http.getBytes(trimmed))
-            install(download).getOrThrow()
+            install(download).getOrThrow().also { recordSource(fileName, trimmed) }
         } finally {
             runCatching {
                 Files.walk(dir).use { paths ->
@@ -168,6 +219,13 @@ object ExtensionHost {
         release()
         Files.deleteIfExists(file)
         setEnabled(file, true)
+        runCatching {
+            val key = file.fileName.toString().substringBeforeLast('.')
+            val remaining = sources() - key
+            if (Files.isRegularFile(sourcesFile())) {
+                Files.writeString(sourcesFile(), json.encodeToString(remaining))
+            }
+        }
         loadAll()
     }
 
@@ -220,6 +278,9 @@ object ExtensionHost {
         val loaded = mutableListOf<LoadedExtension>()
         val errors = mutableListOf<String>()
 
+        // Plugins read the installed-plugin registry while they load.
+        publishRegistry()
+
         val archives = runCatching {
             Files.list(dir).use { stream ->
                 stream.filter { Files.isRegularFile(it) && isSupported(it) }
@@ -230,11 +291,17 @@ object ExtensionHost {
             return ExtensionLoadResult(errors = listOf("Could not read ${dir}: ${it.message}"))
         }
 
+        // Legacy archives are catalogued after the loop, not during it: some plugins register
+        // their providers from the batch event, which only fires once every archive is in.
+        val legacyArchives = mutableListOf<Path>()
         for (archive in archives) {
             if (archive.fileName.toString() in disabled) continue
             try {
                 if (LegacyExtensions.looksLikeLegacy(archive)) {
-                    loaded += loadLegacy(archive)
+                    LegacyExtensions.load(archive)
+                    // `add`, not `+=`: Path is itself an Iterable<Path>, so `+=` would try to
+                    // append its name elements instead of the archive.
+                    legacyArchives.add(archive)
                 } else {
                     loaded += loadNative(archive)
                 }
@@ -242,6 +309,11 @@ object ExtensionHost {
                 val message = t.message ?: t::class.simpleName ?: "unknown error"
                 errors += "${archive.fileName}: $message"
             }
+        }
+
+        if (legacyArchives.isNotEmpty()) {
+            LegacyExtensions.notifyPluginsLoaded()
+            legacyArchives.forEach { archive -> loaded += loadLegacy(archive) }
         }
 
         return ExtensionLoadResult(loaded, errors)
@@ -279,17 +351,22 @@ object ExtensionHost {
         }
     }
 
-    /** One CloudStream plugin can register several providers; each becomes its own catalog. */
+    /**
+     * One CloudStream plugin can register several providers; each becomes its own catalog.
+     *
+     * The archive must already be loaded (see [loadAll]): this turns whatever it contributed —
+     * including providers it registered from `afterPluginsLoadedEvent` — into catalogs.
+     */
     private fun loadLegacy(archive: Path): List<LoadedExtension> {
-        val result = LegacyExtensions.load(archive)
-        val pluginName = result.manifest.name ?: archive.fileName.toString()
+        val manifest = LegacyExtensions.manifestOf(archive)
+        val pluginName = manifest.name ?: archive.fileName.toString()
 
-        return result.providers.map { provider ->
+        return LegacyExtensions.providersOf(archive).map { provider ->
             LoadedExtension(
                 manifest = PluginManifest(
                     name = provider.name,
-                    version = result.manifest.version,
-                    pluginClassName = result.manifest.pluginClassName,
+                    version = manifest.version,
+                    pluginClassName = manifest.pluginClassName,
                 ),
                 catalog = LegacyCatalog(provider, pluginName),
                 file = archive,

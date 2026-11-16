@@ -318,6 +318,9 @@ fun App() {
     suspend fun installPlugin(plugin: RepositoryPlugin): Result<String> = runCatching {
         withContext(Dispatchers.IO) {
             val file = ExtensionRepository.install(plugin, ExtensionHost.ensureExtensionsDir())
+            // Remember where it came from: plugins look themselves up in the installed-plugin
+            // registry by their install url, and treat a missing entry as "not installed".
+            ExtensionHost.recordSource(file.fileName.toString(), plugin.url)
             // Same rule as a manual install: a copy is only kept if it actually loads.
             ExtensionHost.setEnabled(file, true)
             val load = ExtensionHost.loadAll()
@@ -802,6 +805,7 @@ fun App() {
                             onUninstall = ::uninstallExtension,
                             onToggleEnabled = ::setExtensionEnabled,
                             onStatus = { status = it },
+                            onBack = { settingsPage = SettingsPage.Root },
                         )
 
                         SettingsPage.Accounts -> AccountsSettings(

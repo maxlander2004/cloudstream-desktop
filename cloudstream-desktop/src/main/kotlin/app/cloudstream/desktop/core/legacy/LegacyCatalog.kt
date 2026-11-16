@@ -16,6 +16,12 @@ import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.actions.VideoClickAction
+import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -178,6 +184,43 @@ class LegacyCatalog(
 
         // The subtitle callback may arrive after the links, so attach them at the end.
         return links.map { link -> link.copy(subtitles = subtitles.toList()) }
+    }
+
+    /**
+     * Hands an episode to a plugin's own player — the Android app's "Play with …" entries.
+     *
+     * The links are resolved again with [provider.loadLinks], because a `VideoClickAction`
+     * expects real upstream `ExtractorLink`s (it may read quality, headers or the m3u8 type) and
+     * the desktop's simplified links have already lost that detail.
+     */
+    suspend fun playWith(
+        action: VideoClickAction,
+        data: String?,
+        resultEpisode: ResultEpisode,
+    ): Result<Unit> = runCatching {
+        require(!data.isNullOrBlank()) { "this episode has no playable data" }
+
+        val links = mutableListOf<ExtractorLink>()
+        val subs = mutableListOf<SubtitleData>()
+        provider.loadLinks(data, false, { file ->
+            if (file.url.isBlank()) return@loadLinks
+            subs += SubtitleData(
+                originalName = file.lang.ifBlank { "Subtitle" },
+                nameSuffix = "",
+                url = file.url,
+                origin = SubtitleOrigin.EXTERNAL,
+                mimeType = "text/vtt",
+                headers = file.headers.orEmpty(),
+                languageCode = file.langTag,
+            )
+        }) { link -> links += link }
+
+        action.runAction(
+            LegacyExtensions.context(),
+            resultEpisode,
+            LinkLoadingResult(links, subs, HashMap()),
+            0,
+        )
     }
 
     /**

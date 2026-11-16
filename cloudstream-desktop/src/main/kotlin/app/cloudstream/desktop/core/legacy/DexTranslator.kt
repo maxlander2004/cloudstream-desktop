@@ -31,9 +31,9 @@ import java.util.zip.ZipOutputStream
 object DexTranslator {
     /**
      * Bumped whenever the translation itself changes, so cached jars from an older build are
-     * not reused. v2 adds [restoreHyphenatedNames].
+     * not reused. v2 adds [restoreHyphenatedNames]; v3 recomputes stack map frames.
      */
-    private const val CACHE_VERSION = 2
+    private const val CACHE_VERSION = 3
 
     fun cacheDir(): Path =
         Paths.get(System.getProperty("user.home"), ".cloudstream-desktop", "dex-cache")
@@ -128,11 +128,36 @@ object DexTranslator {
     /** Exposed for the test that checks the `_impl` rename. */
     internal fun restoreValueClassNames(bytes: ByteArray): ByteArray = fixClass(bytes)
 
-    private fun fixClass(bytes: ByteArray): ByteArray = runCatching {
-        val writer = ClassWriter(0)
-        ClassReader(bytes).accept(ClassRemapper(writer, ValueClassNameRemapper), 0)
-        writer.toByteArray()
-    }.getOrDefault(bytes)
+    /**
+     * Rewrites one translated class: restores value-class names and recomputes stack map frames.
+     *
+     * Some extensions translate to bytecode without a `StackMapTable`, and the JVM then refuses
+     * to verify any branch target (`VerifyError: Expecting a stackmap frame at branch target …`).
+     * That hit whole repositories — every `com/allforu` plugin failed this way. Recomputing the
+     * frames fixes them; [TolerantWriter] keeps that working when a class in the hierarchy is
+     * missing from the host, which is normal for extension code that mentions Android-only types.
+     */
+    private fun fixClass(bytes: ByteArray): ByteArray {
+        val computed = runCatching {
+            val writer = TolerantWriter()
+            ClassReader(bytes).accept(ClassRemapper(writer, ValueClassNameRemapper), 0)
+            writer.toByteArray()
+        }.getOrNull()
+        if (computed != null) return computed
+
+        // Fall back to the name-only rewrite when frame computation cannot handle the class.
+        return runCatching {
+            val writer = ClassWriter(0)
+            ClassReader(bytes).accept(ClassRemapper(writer, ValueClassNameRemapper), 0)
+            writer.toByteArray()
+        }.getOrDefault(bytes)
+    }
+
+    private class TolerantWriter : ClassWriter(COMPUTE_FRAMES) {
+        override fun getCommonSuperClass(type1: String, type2: String): String =
+            runCatching { super.getCommonSuperClass(type1, type2) }
+                .getOrDefault("java/lang/Object")
+    }
 
     private object ValueClassNameRemapper : Remapper() {
         private const val SUFFIX = "_impl"

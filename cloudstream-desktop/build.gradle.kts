@@ -67,6 +67,8 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.11.4")
+    // Renders screens headlessly, so navigation between panes can be tested without a display.
+    testImplementation(compose.desktop.uiTestJUnit4)
 }
 
 tasks.test {
@@ -96,6 +98,21 @@ tasks.register<JavaExec>("verifyLegacy") {
     description = "Load published CloudStream extensions through the legacy extension host"
     mainClass = "app.cloudstream.desktop.LegacySmokeKt"
     classpath = sourceSets["test"].runtimeClasspath
+}
+
+// Temporary diagnostic: loads every extension in the community catalog and groups the failures.
+tasks.register<JavaExec>("providerDiag") {
+    group = "verification"
+    mainClass = "app.cloudstream.desktop.ProviderDiagKt"
+    classpath = sourceSets["test"].runtimeClasspath
+    jvmArgs("-Xmx2g")
+}
+
+tasks.register<JavaExec>("surveyExtensions") {
+    group = "verification"
+    mainClass = "app.cloudstream.desktop.ExtensionSurveyKt"
+    classpath = sourceSets["test"].runtimeClasspath
+    jvmArgs("-Xmx3g")
 }
 
 /**

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
@@ -31,6 +32,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import app.cloudstream.desktop.core.PluginPlayback
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -127,6 +129,9 @@ fun PlayerScreen(
     var subtitleMenuOpen by remember { mutableStateOf(false) }
     var subtitleSearchOpen by remember { mutableStateOf(false) }
     var embeddedTracks by remember { mutableStateOf<List<TrackDescription>>(emptyList()) }
+    // Players the loaded extensions supply for this episode ("Play with …" in the app).
+    var pluginMenuOpen by remember { mutableStateOf(false) }
+    val pluginPlayers = remember(session, index) { PluginPlayback.choicesFor(session, index) }
 
     val episode = session.episodes.getOrNull(index)
     val video: EmbeddedMediaPlayerComponent? = remember(settings.vlcPath) {
@@ -615,6 +620,41 @@ fun PlayerScreen(
                                 subtitleSearchOpen = true
                             },
                         )
+                    }
+                }
+                if (pluginPlayers.isNotEmpty()) {
+                    Box {
+                        IconButton(onClick = { pluginMenuOpen = true }) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = "Play with an extension player",
+                                tint = Color.White,
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = pluginMenuOpen,
+                            onDismissRequest = { pluginMenuOpen = false },
+                        ) {
+                            pluginPlayers.forEach { choice ->
+                                DropdownMenuItem(
+                                    text = { Text(choice.label) },
+                                    onClick = {
+                                        pluginMenuOpen = false
+                                        onStatus("Opening ${choice.label}…")
+                                        scope.launch {
+                                            PluginPlayback.run(session, index, choice.action)
+                                                .onSuccess { onStatus(choice.label) }
+                                                .onFailure { failure ->
+                                                    onStatus(
+                                                        "${choice.label} failed: " +
+                                                            (failure.message ?: "unknown error"),
+                                                    )
+                                                }
+                                        }
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
                 IconButton(

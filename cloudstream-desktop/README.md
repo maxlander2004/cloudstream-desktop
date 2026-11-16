@@ -97,8 +97,11 @@ row is empty without a sign-in. None of them are caused by the desktop loader.
 
 What does *not* work, and cannot without rework: extensions that need Android-only services.
 `WebView`/`Cloudflare` bypass (`WebViewResolver` is a no-op on the JVM), `Resources`, and
-Android `Context` access. Series and anime providers currently resolve links for the **first
-episode** only — episode selection is not in the UI yet.
+Android `Context` access. Series and anime providers resolve episodes through the result
+screen's season/episode picker (mirroring the Android app's episode-based UI), with support
+for dub/sub status selection where the provider exposes it. Some providers that rely on
+Android-only services (WebView-based resolvers, platform-specific extractors) may still
+fail to resolve playable links on the desktop.
 
 ### Installing an extension
 
@@ -201,18 +204,22 @@ ships is already available.
 
 ## Playback
 
-Playback is delegated to an external player rather than re-implementing ExoPlayer, following
-upstream's own guidance that each platform implements playback natively. Set a command in
-Settings, for example:
+The app includes an in-app player (embedded video via VLCJ/libvlc) with play/pause, seeking,
+episode stepping, resume progress, autoplay-next for series, subtitle loading (sidecar files,
+provider tracks, and online subtitle search where configured), and extension-supplied "Play
+with…" actions when a loaded `.cs3` plugin registers them. In-app playback requires VLC/libvlc
+to be installed and discoverable on the machine (or a VLC folder set in Settings → Player).
+
+When libvlc is unavailable, or when the user chooses "Open externally", playback falls back to
+an external player command configured in Settings, for example:
 
 ```
 mpv
 C:\Program Files\VideoLAN\VLC\vlc.exe
 ```
 
-With no command configured, stream URLs open in the default browser.
-
-Sources that require a `Referer` (most extension scrapers) get it forwarded: `mpv` receives
+With no command configured, stream URLs open in the default browser. Sources that require a
+`Referer` (most extension scrapers) get it forwarded: `mpv` receives
 `--http-header-fields=…` and VLC `--http-referrer=…`. Players that take no headers still get
 the bare URL.
 
@@ -223,17 +230,20 @@ plugin-api/                        Catalog / CatalogItem / StreamLink; what exte
 cs-compat/                         upstream's library module compiled for the JVM (extension ABI)
 extensions/archive-org/            example desktop extension (public-domain films on archive.org)
 src/main/kotlin/app/cloudstream/desktop/
-  Main.kt                  window entry point
-  core/ExtensionHost.kt    extension loader for both formats + install/validate
-  core/ExtensionRepository.kt    repositories + shortcodes (megarepo) + sha256-verified downloads
-  core/legacy/DexTranslator.kt    classes.dex -> JVM bytecode (dex2jar), cached by hash
-  core/legacy/LegacyExtensions.kt original .cs3/.cs/.apk plugin loader (BasePlugin + APIHolder)
-  core/legacy/LegacyCatalog.kt    MainAPI provider -> desktop Catalog
-  core/legacy/NewPipeDownloader.kt  NewPipe init the YouTube extractor requires
-  core/Http.kt             JDK HTTP client wrapper
-  core/Player.kt           external player + settings
-  ui/Theme.kt              upstream dark palette
-  ui/App.kt                navigation, browse, search, extensions, settings
+  Main.kt                          window entry point
+  core/ExtensionHost.kt            extension loader for both formats + install/validate
+  core/ExtensionRepository.kt      repositories + shortcodes (megarepo) + sha256-verified downloads
+  core/legacy/                     dex translation, .cs3/.apk plugin loading, provider/catalog bridge
+  core/Playback.kt                 playback sessions, episode ordering, resume rules
+  core/PluginPlayback.kt           extension-supplied "Play with…" actions for loaded plugins
+  core/Library.kt                  continue-watching / progress persistence
+  core/Player.kt                   external player launch + header forwarding
+  core/DownloadManager.kt          downloads (direct/ranged where supported)
+  core/Subtitles.kt                local/remote subtitle handling
+  core/Settings.kt, IptvSource.kt, AppUpdates.kt, BackupRestore.kt, Tracking.kt, ...
+  ui/App.kt                        navigation shell
+  ui/HomeScreen.kt, SearchScreen.kt, ResultScreen.kt, PlayerScreen.kt
+  ui/ExtensionsScreen.kt, DownloadsScreen.kt, SettingsScreen.kt, Theme.kt
 ```
 
 `cs-compat` does not copy or rewrite anything: it points its source sets at
