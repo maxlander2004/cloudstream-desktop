@@ -71,8 +71,28 @@ dependencies {
     testImplementation(compose.desktop.uiTestJUnit4)
 }
 
+/**
+ * `test` is hermetic on purpose: no test in it touches the network, so a pull request never fails
+ * because a third-party site was slow. Anything that does reach out is tagged `network` and lives
+ * in `networkTest` (see the live-checks workflow); see `TorrentSmokeTest` for the one that is also
+ * opt-in behind an environment variable.
+ */
 tasks.test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        excludeTags("network")
+    }
+    testLogging { events("passed", "failed", "skipped") }
+}
+
+/** The live half: providers, torrents and third-party APIs, run on a schedule, never per PR. */
+tasks.register<org.gradle.api.tasks.testing.Test>("networkTest") {
+    group = "verification"
+    description = "Runs the tests tagged `network`, which need internet access"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("network")
+    }
     testLogging { events("passed", "failed", "skipped") }
 }
 
@@ -97,6 +117,19 @@ tasks.register<JavaExec>("verifyLegacy") {
     group = "verification"
     description = "Load published CloudStream extensions through the legacy extension host"
     mainClass = "app.cloudstream.desktop.LegacySmokeKt"
+    classpath = sourceSets["test"].runtimeClasspath
+}
+
+/**
+ * The ABI smoke test: loads one pinned published archive through the real loader, with no
+ * browsing or searching. `AbiContractTest` covers the same promise offline by reflection; this
+ * one proves that translated bytecode from a real provider actually links. Needs network, so it
+ * runs in the scheduled live-checks workflow rather than in every pull request.
+ */
+tasks.register<JavaExec>("abiSmoke") {
+    group = "verification"
+    description = "Load a pinned published extension to prove the extension ABI still links"
+    mainClass = "app.cloudstream.desktop.AbiSmokeKt"
     classpath = sourceSets["test"].runtimeClasspath
 }
 

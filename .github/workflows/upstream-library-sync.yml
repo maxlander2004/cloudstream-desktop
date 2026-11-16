@@ -106,6 +106,15 @@ jobs:
           echo "### Changed files" >> "$GITHUB_STEP_SUMMARY"
           git status --short src-cloudstream/library | head -50 | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Upstream's library declares its dependencies through a version catalog; :cs-compat has to
+      # repeat them literally, because it compiles those sources in its own project. A bump in the
+      # catalog arrives with the sources and leaves the literal behind, which compiles here and
+      # then fails at runtime inside an extension. Stopping before the pull request turns that into
+      # one precise message.
+      - name: Check dependency drift against :cs-compat
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        run: perl scripts/check-dependency-drift.pl
+
       - uses: actions/setup-java@v4
         if: steps.current.outputs.version != steps.upstream.outputs.version
         with:
@@ -122,6 +131,14 @@ jobs:
         if: steps.current.outputs.version != steps.upstream.outputs.version
         working-directory: cloudstream-desktop
         run: ./gradlew --console=plain :cs-compat:compileKotlinJvm test
+
+      # Compiling proves the sources build; this proves a real extension's translated bytecode
+      # still links against them. It needs the network, which this job already has, so it does
+      # not belong in `test`.
+      - name: ABI smoke test against a published extension
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        working-directory: cloudstream-desktop
+        run: ./gradlew --console=plain abiSmoke
 
       - name: Open the pull request
         if: steps.current.outputs.version != steps.upstream.outputs.version

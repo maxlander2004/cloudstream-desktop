@@ -1,6 +1,7 @@
 package app.cloudstream.desktop
 
 import app.cloudstream.desktop.core.TorrentEngine
+import org.junit.jupiter.api.Tag
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
@@ -22,6 +23,7 @@ import kotlin.test.assertTrue
  *
  * Without those variables the test passes without touching anything, which is what CI does.
  */
+@Tag("network")
 class TorrentSmokeTest {
 
     private val enabled = System.getenv("TORRENT_SMOKE") == "true"

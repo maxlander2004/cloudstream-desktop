@@ -1,0 +1,51 @@
+name: Live checks
+
+# `test` is hermetic by design: no test in it reaches the network, so a pull request never fails
+# because a third-party provider was slow or a repository index was being rebuilt. The checks
+# that genuinely need the internet live here instead, on a schedule. A failure here means
+# something real changed upstream — an extractor, the extension repository, a torrent bridge —
+# and is worth looking at, but it is not a reason to block a pull request.
+on:
+  schedule:
+    # Nightly, away from the hour boundary and from the 06:17 upstream sync.
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-checks
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudstream-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Cheap and offline, but this is the workflow most likely to notice a new upstream release
+      # before the sync has had time to run.
+      - name: Dependency drift against upstream's catalog
+        run: perl ../scripts/check-dependency-drift.pl
+
+      # The tests tagged `network`: live providers, third-party APIs, the torrent bridge. Nothing
+      # is tagged yet beyond the opt-in torrent smoke, which skips itself without TORRENT_SMOKE.
+      # New tests that reach out belong behind this tag rather than in `test`.
+      - name: Network-tagged tests
+        run: ./gradlew --console=plain networkTest
+
+      # The ABI's real-world half: a published archive's translated bytecode linking against
+      # :cs-compat, with no browsing or searching.
+      - name: ABI smoke test against a published extension
+        run: ./gradlew --console=plain abiSmoke
