@@ -1,0 +1,166 @@
+name: Sync upstream library
+
+# This desktop port compiles upstream CloudStream's `library` module through :cs-compat, so it
+# silently rots behind the Android app until someone notices and asks. This runs daily, compares
+# the vendored `src-cloudstream/library` against upstream's newest release tag, replaces it with
+# that release's sources, compiles and tests against them, and opens a pull request with the
+# difference. Nothing is merged automatically: a human (or the review of the PR) still decides.
+on:
+  schedule:
+    # Daily, deliberately off the top of the hour: GitHub's scheduler is busiest at :00.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  # Editing the workflow runs it once, so a change to this file is validated by its own
+  # (no-op, when versions match) execution instead of waiting for the next morning.
+  push:
+    paths:
+      - ".github/workflows/upstream-library-sync.yml"
+
+permissions:
+  # The branch push and the pull request both use the workflow token.
+  contents: write
+  pull-requests: write
+
+# One sync at a time; a slow run must not race the next day's.
+concurrency:
+  group: upstream-library-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: recloudstream/cloudstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The pull request push uses the token below, not the one checkout stores.
+          persist-credentials: false
+
+      - name: Find the latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(curl -sSL --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" | jq -r '.tag_name // empty')"
+          if [ -z "$tag" ]; then
+            echo "::error::Could not read the latest release tag of $UPSTREAM_REPO"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $tag"
+
+      - name: Read the vendored version
+        id: current
+        run: |
+          version="$(sed -n 's/^versionName = "\(.*\)"$/\1/p' src-cloudstream/gradle/libs.versions.toml | head -1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Vendored library is at: ${version:-unknown}"
+
+      - name: Report that it is already current
+        if: steps.current.outputs.version == steps.upstream.outputs.version
+        run: |
+          echo "Already on ${{ steps.upstream.outputs.tag }} — nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Download the upstream release sources
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        run: |
+          mkdir -p "$RUNNER_TEMP/upstream"
+          curl -sSL --retry 3 -o "$RUNNER_TEMP/upstream.tar.gz" \
+            "https://codeload.github.com/$UPSTREAM_REPO/tar.gz/refs/tags/${{ steps.upstream.outputs.tag }}"
+          tar xzf "$RUNNER_TEMP/upstream.tar.gz" -C "$RUNNER_TEMP/upstream" --strip-components=1
+          # A tag without the module would otherwise "sync" by deleting it.
+          test -d "$RUNNER_TEMP/upstream/library/src"
+          echo "Unpacked ${{ steps.upstream.outputs.tag }}"
+
+      - name: Replace the vendored library with the release's sources
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        run: |
+          # The vendored tree is exactly upstream's `library` module, so it is replaced rather
+          # than patched: files that release deleted are deleted here too, which a copy-on-top
+          # would miss. `cp -a` of the directory contents keeps the layout identical.
+          rm -rf src-cloudstream/library
+          mkdir -p src-cloudstream/library
+          cp -a "$RUNNER_TEMP/upstream/library/." src-cloudstream/library/
+
+          # Keep the recorded upstream version in step with the sources, using upstream's own
+          # versionCode for the release.
+          sed -i -E 's/^versionName = ".*"$/versionName = "${{ steps.upstream.outputs.version }}"/' \
+            src-cloudstream/gradle/libs.versions.toml
+          upstream_code="$(sed -n 's/^versionCode = "\(.*\)"$/\1/p' "$RUNNER_TEMP/upstream/gradle/libs.versions.toml" | head -1)"
+          if [ -n "$upstream_code" ]; then
+            sed -i -E "s/^versionCode = \".*\"$/versionCode = \"$upstream_code\"/" \
+              src-cloudstream/gradle/libs.versions.toml
+          fi
+
+          # The README states which upstream release this tracks; keep that line honest.
+          sed -i -E 's/(tracking upstream \*\*)[0-9]+\.[0-9]+(\.[0-9]+)?(\*\*)/\1${{ steps.upstream.outputs.version }}\3/' \
+            cloudstream-desktop/README.md
+
+          echo "### Changed files" >> "$GITHUB_STEP_SUMMARY"
+          git status --short src-cloudstream/library | head -50 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-java@v4
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+
+      # The vendored sources are the extension ABI: if the new release changed something
+      # :cs-compat or the desktop app depends on, this is where it shows up. A PR is only opened
+      # when the new library actually compiles and the existing tests still pass.
+      - name: Compile and test against the new library
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        working-directory: cloudstream-desktop
+        run: ./gradlew --console=plain :cs-compat:compileKotlinJvm test
+
+      - name: Open the pull request
+        if: steps.current.outputs.version != steps.upstream.outputs.version
+        uses: peter-evans/create-pull-request@v6
+        with:
+          # A PR opened with the workflow token does not trigger other workflows (GitHub
+          # suppresses that to avoid loops), so "Build desktop installers" runs when this is
+          # merged. To get those checks on the PR itself, add a SYNC_TOKEN secret: a fine-grained
+          # PAT with contents and pull-requests write access.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+          branch: chore/upstream-library-${{ steps.upstream.outputs.version }}
+          delete-branch: true
+          if-no-changes: ignore
+          commit-message: |
+            Sync upstream library to ${{ steps.upstream.outputs.tag }}
+
+            Replaces src-cloudstream/library with that release's sources and bumps the
+            recorded version, so extensions keep loading against the current library.
+          title: Sync upstream library to ${{ steps.upstream.outputs.tag }}
+          body: |
+            Upstream CloudStream released `${{ steps.upstream.outputs.tag }}`
+            (https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ steps.upstream.outputs.tag }}).
+
+            This repository's vendored `src-cloudstream/library` was at
+            `${{ steps.current.outputs.version }}`. This PR replaces it with that release's
+            `library` sources — added, changed and deleted files — bumps
+            `src-cloudstream/gradle/libs.versions.toml` to match, and updates the version the
+            README claims to track.
+
+            `:cs-compat:compileKotlinJvm` and the desktop tests were run against the new sources
+            in the workflow that opened this PR. Merging runs **Build desktop installers** for
+            Windows and Linux.
+
+            Review the diff for anything the desktop side hard-codes itself (extractor or
+            dependency changes in `library/build.gradle.kts` need the same bump in
+            `cloudstream-desktop/cs-compat/build.gradle.kts`).
+          labels: |
+            upstream-sync
+          add-paths: |
+            src-cloudstream/library
+            src-cloudstream/gradle/libs.versions.toml
+            cloudstream-desktop/README.md

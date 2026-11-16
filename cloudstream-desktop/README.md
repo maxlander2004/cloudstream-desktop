@@ -1,8 +1,8 @@
 # CloudStream Desktop
 
 A native desktop build of [CloudStream](https://github.com/recloudstream/cloudstream) using
-Compose Multiplatform, tracking upstream **4.9.1** (the November Update): the extension library
-under `src-cloudstream/library` is that release's source. It installs and runs like a normal Windows program: double-click the
+Compose Multiplatform, tracking upstream **4.9.1**: the extension library under
+`src-cloudstream/library` is that release's source. It installs and runs like a normal Windows program: double-click the
 shortcut, a window opens. No emulator, no Windows Subsystem for Android, no Android runtime
 of any kind — `jpackage` bundles a Java runtime and a native launcher into a single installer.
 
