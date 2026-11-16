@@ -129,6 +129,12 @@ fun PlayerScreen(
     var subtitleMenuOpen by remember { mutableStateOf(false) }
     var subtitleSearchOpen by remember { mutableStateOf(false) }
     var embeddedTracks by remember { mutableStateOf<List<TrackDescription>>(emptyList()) }
+    // Subtitle delay in milliseconds, as the 4.9 player's delay dialog has it: positive shows
+    // subtitles later, negative earlier. Applied through libvlc.
+    var subtitleDelayMs by remember { mutableStateOf(0L) }
+    var subtitleDelayOpen by remember { mutableStateOf(false) }
+    // The wall clock the 4.9 player draws over the video.
+    var clock by remember { mutableStateOf(java.time.LocalTime.now()) }
     // Players the loaded extensions supply for this episode ("Play with …" in the app).
     var pluginMenuOpen by remember { mutableStateOf(false) }
     val pluginPlayers = remember(session, index) { PluginPlayback.choicesFor(session, index) }
@@ -152,6 +158,13 @@ fun PlayerScreen(
             // The bridge and its aria2 processes only exist for as long as the player does.
             TorrentEngine.stopAll()
             runCatching { video?.release() }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            clock = java.time.LocalTime.now()
+            delay(1_000)
         }
     }
 
@@ -381,6 +394,16 @@ fun PlayerScreen(
         if (!attached) onStatus("VLC could not read the subtitle file ${file.fileName}")
     }
 
+    /**
+     * libvlc resets the subtitle delay when a new media is opened, so it is re-applied on every
+     * episode and whenever the dialog changes it.
+     */
+    LaunchedEffect(video, index, subtitleDelayMs) {
+        val player = video?.mediaPlayer() ?: return@LaunchedEffect
+        withTimeoutOrNull(15_000) { while (!playing) delay(200) }
+        runCatching { player.subpictures().setDelay(subtitleDelayMs * 1000L) }
+    }
+
     // VLC only knows the media's own tracks after it has parsed the file, so refresh when the
     // menu is opened rather than when the episode starts.
     LaunchedEffect(video, index, subtitleMenuOpen) {
@@ -487,6 +510,12 @@ fun PlayerScreen(
                 if (video != null) {
                     SwingPanel(factory = { video }, modifier = Modifier.fillMaxSize())
                 }
+                Text(
+                    clock.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")),
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
+                )
 
                 if (!engineReady) {
                     Column(
@@ -603,6 +632,21 @@ fun PlayerScreen(
                             )
                         }
                         DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (subtitleDelayMs == 0L) {
+                                        "Subtitle delay…"
+                                    } else {
+                                        "Subtitle delay (${formatDelay(subtitleDelayMs)})…"
+                                    },
+                                )
+                            },
+                            onClick = {
+                                subtitleMenuOpen = false
+                                subtitleDelayOpen = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("Open subtitle file…") },
                             onClick = {
                                 subtitleMenuOpen = false
@@ -682,6 +726,17 @@ fun PlayerScreen(
         }
     }
 
+    if (subtitleDelayOpen) {
+        SubtitleDelayDialog(
+            delayMs = subtitleDelayMs,
+            onChange = { value ->
+                subtitleDelayMs = value
+                runCatching { video?.mediaPlayer()?.subpictures()?.setDelay(value * 1000L) }
+            },
+            onDismiss = { subtitleDelayOpen = false },
+        )
+    }
+
     if (subtitleSearchOpen) {
         SubtitleSearchDialog(
             settings = settings,
@@ -706,6 +761,59 @@ internal fun subtitleQueryFor(title: String, episode: app.cloudstream.desktop.co
     } else {
         title
     }
+}
+
+/**
+ * The 4.9 player's subtitle delay dialog: nudge the selected track earlier or later while it
+ * plays, instead of re-syncing by hand.
+ */
+@Composable
+private fun SubtitleDelayDialog(
+    delayMs: Long,
+    onChange: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Subtitle delay") },
+        text = {
+            Column {
+                Text(formatDelay(delayMs), fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Positive values show subtitles later, negative values earlier. " +
+                        "The delay is applied to the track that is playing.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(-5000L, -500L, 0L, 500L, 5000L).forEach { step ->
+                        TextButton(onClick = { onChange(if (step == 0L) 0L else delayMs + step) }) {
+                            Text(
+                                when {
+                                    step == 0L -> "Reset"
+                                    step < 0 -> "−${-step / 1000.0}s"
+                                    else -> "+${step / 1000.0}s"
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+/** `+1.5s` / `−0.5s` / `0.0s`, the same shape the delay control shows. */
+private fun formatDelay(delayMs: Long): String {
+    val sign = when {
+        delayMs > 0 -> "+"
+        delayMs < 0 -> "−"
+        else -> ""
+    }
+    return "%s%.1fs".format(sign, kotlin.math.abs(delayMs) / 1000.0)
 }
 
 /**

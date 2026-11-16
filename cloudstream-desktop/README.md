@@ -1,7 +1,8 @@
 # CloudStream Desktop
 
 A native desktop build of [CloudStream](https://github.com/recloudstream/cloudstream) using
-Compose Multiplatform. It installs and runs like a normal Windows program: double-click the
+Compose Multiplatform, tracking upstream **4.9.1** (the November Update): the extension library
+under `src-cloudstream/library` is that release's source. It installs and runs like a normal Windows program: double-click the
 shortcut, a window opens. No emulator, no Windows Subsystem for Android, no Android runtime
 of any kind — `jpackage` bundles a Java runtime and a native launcher into a single installer.
 
@@ -206,8 +207,9 @@ ships is already available.
 
 The app includes an in-app player (embedded video via VLCJ/libvlc) with play/pause, seeking,
 episode stepping, resume progress, autoplay-next for series, subtitle loading (sidecar files,
-provider tracks, and online subtitle search where configured), and extension-supplied "Play
-with…" actions when a loaded `.cs3` plugin registers them. In-app playback requires VLC/libvlc
+provider tracks, and online subtitle search where configured) with a subtitle delay control
+(±0.5 s / ±5 s steps or reset, applied to the playing track), a clock overlay on the video, and
+extension-supplied "Play with…" actions when a loaded `.cs3` plugin registers them. In-app playback requires VLC/libvlc
 to be installed and discoverable on the machine (or a VLC folder set in Settings → Player).
 
 When libvlc is unavailable, or when the user chooses "Open externally", playback falls back to

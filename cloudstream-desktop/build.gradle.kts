@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "app.cloudstream.desktop"
-version = "1.3.9"
+version = "1.4.0"
 
 kotlin {
     jvmToolchain(21)
@@ -214,7 +214,7 @@ compose.desktop {
             // .deb is produced on Linux, .dmg on macOS.
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "CloudStream"
-            packageVersion = "1.3.9"
+            packageVersion = "1.4.0"
 
             // jpackage builds the bundled runtime with jlink, whose default module set has no
             // java.net.http — the installer then died at launch with
