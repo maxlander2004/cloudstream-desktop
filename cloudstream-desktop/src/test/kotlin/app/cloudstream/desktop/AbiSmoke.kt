@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.security.MessageDigest
+import java.time.Duration
 
 /**
  * The ABI smoke test: one pinned, real CloudStream archive, loaded and nothing more.
@@ -94,21 +95,44 @@ fun main() = runBlocking {
     println("ABI holds: ${load.providers.size} provider(s) loaded from a published archive")
 }
 
-/** Downloaded once per build directory, so a rerun does not depend on the same host twice. */
+/**
+ * Downloaded once per build directory, so a rerun does not depend on the same host twice.
+ *
+ * A scheduled check that fails because a raw.githubusercontent.com request timed out teaches
+ * nothing about this port, so a transient failure is retried with a short backoff before the
+ * run is called red. The timeouts are there for the opposite reason: without them a hung socket
+ * would stall the nightly job until the runner's own limit, which says even less.
+ */
 private fun download(url: String): Path {
     val cache = Paths.get("build", "abi-smoke").toAbsolutePath()
     Files.createDirectories(cache)
     val target = cache.resolve(url.substringAfterLast('/'))
     if (Files.isRegularFile(target) && Files.size(target) > 0) return target
 
-    val response = HttpClient.newHttpClient().send(
-        HttpRequest.newBuilder(URI.create(url)).build(),
-        HttpResponse.BodyHandlers.ofByteArray(),
-    )
-    check(response.statusCode() == 200) { "download failed with HTTP ${response.statusCode()}" }
-    check(response.body().isNotEmpty()) { "download was empty" }
-    Files.write(target, response.body())
-    return target
+    val client = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(20))
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build()
+    val request = HttpRequest.newBuilder(URI.create(url))
+        .timeout(Duration.ofSeconds(60))
+        .build()
+
+    var last: Throwable? = null
+    for (attempt in 1..ATTEMPTS) {
+        try {
+            val response = client.send(request, HttpResponse.BodyHandlers.ofByteArray())
+            check(response.statusCode() == 200) { "download failed with HTTP ${response.statusCode()}" }
+            check(response.body().isNotEmpty()) { "download was empty" }
+            Files.write(target, response.body())
+            return target
+        } catch (t: Throwable) {
+            last = t
+            if (attempt == ATTEMPTS) break
+            println("  fetch attempt $attempt/$ATTEMPTS failed: ${t::class.simpleName}: ${t.message}")
+            Thread.sleep(2_000L * attempt)
+        }
+    }
+    throw last ?: IllegalStateException("download failed without an exception")
 }
 
 private fun sha256(file: Path): String =
@@ -123,3 +147,6 @@ private fun sha256(file: Path): String =
  */
 private const val PINNED_URL =
     "https://raw.githubusercontent.com/recloudstream/extensions/builds/InternetArchiveProvider.cs3"
+
+/** Retries for the archive fetch only; the ABI verdict itself is never retried. */
+private const val ATTEMPTS = 3
