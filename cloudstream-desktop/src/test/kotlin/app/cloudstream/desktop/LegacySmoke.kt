@@ -36,24 +36,36 @@ fun main(args: Array<String>) = runBlocking {
             println("plugin      : ${load.manifest.name} v${load.manifest.version} (${load.manifest.pluginClassName})")
             println("providers   : ${load.providers.size}")
 
+            // These five are pinned because each is known to ship a provider, so an empty list
+            // means the plugin's own load() registered nothing — a real ABI or host failure,
+            // not a plugin that only contributes extractors.
+            if (load.providers.isEmpty()) {
+                println("    ABI       : FAILED — the plugin registered no providers")
+                failures++
+            }
+
             for (provider in load.providers) {
                 val catalog = LegacyCatalog(provider, load.manifest.name ?: file.fileName.toString())
                 println("  - ${catalog.name}  [${catalog.description}]")
 
                 // The ABI half of this run, asserted here so the pull-request path gets it from
                 // an archive it already downloads. `AbiContractTest` covers the same members by
-                // reflection offline; these two lines check the outcome those members are for:
-                // the provider is a MainAPI the host can use, and its own load() registered it.
-                // Registration is checked by identity, not by a registry size delta, because
-                // `load()` registers while it runs and a delta measures nothing.
+                // reflection offline; these lines check what those members are for: the provider
+                // is a MainAPI, and its class was defined by this archive's translated jar rather
+                // than by the host's classpath (the loader is parent-first, so a host class of
+                // the same name would be substituted silently).
+                //
+                // There is deliberately no "is it in APIHolder.allProviders" assertion here:
+                // `load()` builds its provider list by diffing that very registry, so testing
+                // membership of it would be a tautology that can never fail.
                 if (!MainAPI::class.java.isAssignableFrom(provider.javaClass)) {
                     println("    ABI       : FAILED — ${provider.javaClass.name} is not a MainAPI")
                     failures++
-                } else if (APIHolder.allProviders.none { it === provider }) {
-                    println("    ABI       : FAILED — the provider never reached APIHolder.allProviders")
+                } else if (provider.javaClass.classLoader !== load.classLoader) {
+                    println("    ABI       : FAILED — ${provider.javaClass.name} was not defined by this archive")
                     failures++
                 } else {
-                    println("    ABI       : ok — MainAPI, registered in APIHolder")
+                    println("    ABI       : ok — MainAPI defined by this archive's own classes")
                 }
 
                 val browse = runCatching { catalog.browse() }

@@ -1,7 +1,6 @@
 package app.cloudstream.desktop
 
 import app.cloudstream.desktop.core.legacy.LegacyExtensions
-import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainAPI
 import kotlinx.coroutines.runBlocking
 import java.net.URI
@@ -77,12 +76,12 @@ fun main() = runBlocking {
             failures++
         }
 
-        // Registration is the observable outcome of the plugin's own load() running, and what
-        // makes the source appear in the app at all. Checked by identity rather than by
-        // counting: `load()` registers while it runs, so a size delta around the call is not a
-        // measurement of anything.
-        if (APIHolder.allProviders.none { it === provider }) {
-            println("    FAILED: the provider never reached APIHolder.allProviders")
+        // The provider's class must come from this archive's translated jar. Checked against the
+        // loader rather than by asking whether the provider is in `APIHolder.allProviders`:
+        // `load()` derives its provider list by diffing that registry, so a membership test there
+        // is a tautology that can never fail (the earlier version of this check was exactly that).
+        if (provider.javaClass.classLoader !== load.classLoader) {
+            println("    FAILED: ${provider.javaClass.name} was not defined by this archive")
             failures++
         }
     }
