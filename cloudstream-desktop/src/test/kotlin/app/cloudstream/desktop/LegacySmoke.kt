@@ -3,6 +3,7 @@ package app.cloudstream.desktop
 import app.cloudstream.desktop.core.ExtensionHost
 import app.cloudstream.desktop.core.ExtensionRepository
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.MainAPI
 import app.cloudstream.desktop.core.legacy.LegacyCatalog
 import app.cloudstream.desktop.core.legacy.LegacyExtensions
 import kotlinx.coroutines.runBlocking
@@ -38,6 +39,22 @@ fun main(args: Array<String>) = runBlocking {
             for (provider in load.providers) {
                 val catalog = LegacyCatalog(provider, load.manifest.name ?: file.fileName.toString())
                 println("  - ${catalog.name}  [${catalog.description}]")
+
+                // The ABI half of this run, asserted here so the pull-request path gets it from
+                // an archive it already downloads. `AbiContractTest` covers the same members by
+                // reflection offline; these two lines check the outcome those members are for:
+                // the provider is a MainAPI the host can use, and its own load() registered it.
+                // Registration is checked by identity, not by a registry size delta, because
+                // `load()` registers while it runs and a delta measures nothing.
+                if (!MainAPI::class.java.isAssignableFrom(provider.javaClass)) {
+                    println("    ABI       : FAILED — ${provider.javaClass.name} is not a MainAPI")
+                    failures++
+                } else if (APIHolder.allProviders.none { it === provider }) {
+                    println("    ABI       : FAILED — the provider never reached APIHolder.allProviders")
+                    failures++
+                } else {
+                    println("    ABI       : ok — MainAPI, registered in APIHolder")
+                }
 
                 val browse = runCatching { catalog.browse() }
                 println("    browse    : " + browse.fold(

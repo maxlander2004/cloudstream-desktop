@@ -57,3 +57,48 @@ jobs:
       # :cs-compat, with no browsing or searching.
       - name: ABI smoke test against a published extension
         run: ./gradlew --console=plain abiSmoke
+
+  # A check nobody watches is a check that is allowed to die. A green build stays silent, so a
+  # scheduled failure would otherwise be a red run in a list that nobody opens; this puts it
+  # where somebody will see it. One issue, updated on each failure rather than a new one per
+  # night, and closed automatically once a scheduled run is green again.
+  report:
+    needs: live
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the live-checks issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_RESULT: ${{ needs.live.result }}
+          SHA: ${{ github.sha }}
+        run: |
+          title="Scheduled live checks are failing"
+          existing="$(gh issue list --state open --search "in:title \"$title\"" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)"
+
+          if [ "$JOB_RESULT" = "success" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "Green again: $RUN_URL"
+              echo "Closed issue #$existing"
+            else
+              echo "Green, and no open issue to close"
+            fi
+            exit 0
+          fi
+
+          body="$(printf 'The scheduled live checks failed: %s\n\n- commit: `%s`\n- workflow: %s\n\nThe steps are the dependency-drift check against upstream, the network-tagged tests and the\nreal-archive ABI smoke test. A failure here means something changed upstream, not that a pull\nrequest broke something; the run log says which step and why.\n' \
+            "$JOB_RESULT" "$SHA" "$RUN_URL")"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+            echo "Updated issue #$existing"
+          else
+            gh issue create --title "$title" --body "$body"
+            echo "Opened a new issue"
+          fi
