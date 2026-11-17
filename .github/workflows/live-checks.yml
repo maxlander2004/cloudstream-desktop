@@ -10,6 +10,14 @@ on:
     # Nightly, away from the hour boundary and from the 06:17 upstream sync.
     - cron: "43 4 * * *"
   workflow_dispatch:
+  # Changing the checks (or the archive smoke check itself) runs them immediately, so a fix to
+  # this file is proved by an execution rather than by waiting for the next night.
+  push:
+    paths:
+      - ".github/workflows/live-checks.yml"
+      - "cloudstream-desktop/src/test/kotlin/app/cloudstream/desktop/AbiSmoke.kt"
+      - "cloudstream-desktop/src/test/kotlin/app/cloudstream/desktop/AbiContractTest.kt"
+      - "scripts/check-dependency-drift.pl"
 
 permissions:
   contents: read
