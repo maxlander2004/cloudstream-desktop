@@ -9,6 +9,8 @@ on:
   schedule:
     # Nightly, away from the hour boundary and from the 06:17 upstream sync.
     - cron: "43 4 * * *"
+  # Dispatch is how this workflow is exercised on demand: the report job runs on it too, so the
+  # create/update/close path can be proved without editing the condition it is testing.
   workflow_dispatch:
   # Changing the checks (or the archive smoke check itself) runs them immediately, so a fix to
   # this file is proved by an execution rather than by waiting for the next night.
@@ -17,6 +19,7 @@ on:
       - ".github/workflows/live-checks.yml"
       - "cloudstream-desktop/src/test/kotlin/app/cloudstream/desktop/AbiSmoke.kt"
       - "cloudstream-desktop/src/test/kotlin/app/cloudstream/desktop/AbiContractTest.kt"
+      - "cloudstream-desktop/src/test/kotlin/app/cloudstream/desktop/ExtensionEcosystemTest.kt"
       - "scripts/check-dependency-drift.pl"
 
 permissions:
@@ -27,11 +30,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Attempt one. Each check runs with `continue-on-error` so the job reaches the gate below with
+  # all three outcomes recorded; the gate then fails the job, which is what triggers the retry.
+  # Without that, the first failing check would abort the job and there would be no way to say
+  # in the issue *which* check failed.
   live:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: cloudstream-desktop
+    outputs:
+      drift: ${{ steps.drift.outcome }}
+      network: ${{ steps.network.outcome }}
+      abi: ${{ steps.abi.outcome }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,27 +56,119 @@ jobs:
       # Cheap and offline, but this is the workflow most likely to notice a new upstream release
       # before the sync has had time to run.
       - name: Dependency drift against upstream's catalog
+        id: drift
+        continue-on-error: true
         run: perl ../scripts/check-dependency-drift.pl
 
-      # The tests tagged `network`: live providers, third-party APIs, the torrent bridge. Nothing
-      # is tagged yet beyond the opt-in torrent smoke, which skips itself without TORRENT_SMOKE.
-      # New tests that reach out belong behind this tag rather than in `test`.
+      # The tests tagged `network`. `ExtensionEcosystemTest` is the bounded set: the official
+      # repository's index, then two of the archives it advertises, installed hash-verified and
+      # loaded. `TorrentSmokeTest` is tagged too but skips itself without TORRENT_SMOKE, because
+      # it needs aria2 and a live magnet.
       - name: Network-tagged tests
+        id: network
+        continue-on-error: true
         run: ./gradlew --console=plain networkTest
 
       # The ABI's real-world half: a published archive's translated bytecode linking against
       # :cs-compat, with no browsing or searching.
       - name: ABI smoke test against a published extension
+        id: abi
+        continue-on-error: true
         run: ./gradlew --console=plain abiSmoke
+
+      - name: Fail when any check above failed
+        if: always()
+        env:
+          DRIFT: ${{ steps.drift.outcome }}
+          NETWORK: ${{ steps.network.outcome }}
+          ABI: ${{ steps.abi.outcome }}
+        run: |
+          # Any outcome other than success — including skipped, which is what a failed setup
+          # step leaves behind — counts as a failure of that check.
+          failed=""
+          [ "$DRIFT" = "success" ] || failed="$failed drift($DRIFT)"
+          [ "$NETWORK" = "success" ] || failed="$failed network($NETWORK)"
+          [ "$ABI" = "success" ] || failed="$failed abi($ABI)"
+          if [ -n "$failed" ]; then
+            echo "::error::Attempt 1 failed:$failed"
+            exit 1
+          fi
+
+  # Attempt two: only the checks that failed, once. A nightly that checks the internet will
+  # occasionally fail for a reason that is gone a minute later, and a report that treats a
+  # timeout like a regression is a report people learn to ignore.
+  retry:
+    needs: live
+    if: always() && needs.live.result == 'failure'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudstream-desktop
+    outputs:
+      drift: ${{ steps.drift.outcome }}
+      network: ${{ steps.network.outcome }}
+      abi: ${{ steps.abi.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Dependency drift against upstream's catalog (retry)
+        id: drift
+        if: needs.live.outputs.drift != 'success'
+        continue-on-error: true
+        run: perl ../scripts/check-dependency-drift.pl
+
+      - name: Network-tagged tests (retry)
+        id: network
+        if: needs.live.outputs.network != 'success'
+        continue-on-error: true
+        run: ./gradlew --console=plain networkTest
+
+      - name: ABI smoke test against a published extension (retry)
+        id: abi
+        if: needs.live.outputs.abi != 'success'
+        continue-on-error: true
+        run: ./gradlew --console=plain abiSmoke
+
+      - name: Fail when a check failed both times
+        if: always()
+        env:
+          LIVE_DRIFT: ${{ needs.live.outputs.drift }}
+          LIVE_NETWORK: ${{ needs.live.outputs.network }}
+          LIVE_ABI: ${{ needs.live.outputs.abi }}
+          RETRY_DRIFT: ${{ steps.drift.outcome }}
+          RETRY_NETWORK: ${{ steps.network.outcome }}
+          RETRY_ABI: ${{ steps.abi.outcome }}
+        run: |
+          failed=""
+          for check in drift network abi; do
+            upper="$(printf '%s' "$check" | tr 'a-z' 'A-Z')"
+            first_var="LIVE_$upper"
+            second_var="RETRY_$upper"
+            first="${!first_var}"
+            second="${!second_var}"
+            if [ "$first" = "success" ] || [ "$second" = "success" ]; then continue; fi
+            failed="$failed $check($first -> $second)"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Failed twice:$failed"
+            exit 1
+          fi
 
   # A check nobody watches is a check that is allowed to die. A green build stays silent, so a
   # failure on the schedule (or on a manual dispatch, so the path can be exercised on demand)
-  # would otherwise be a red run in a list that nobody opens; this puts it
-  # where somebody will see it. One issue, updated on each failure rather than a new one per
-  # night, and closed automatically once a run is green again. Push-triggered runs are silent:
-  # they prove this file, they should not page anyone.
+  # would otherwise be a red run in a list that nobody opens; this puts it where somebody will
+  # see it. One issue, updated on each failure rather than a new one per night, and closed
+  # automatically once a run is green again. Push-triggered runs are silent: they prove this
+  # file, they should not page anyone.
   report:
-    needs: live
+    needs: [live, retry]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
@@ -77,14 +180,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          JOB_RESULT: ${{ needs.live.result }}
+          LIVE: ${{ needs.live.result }}
+          LIVE_DRIFT: ${{ needs.live.outputs.drift }}
+          LIVE_NETWORK: ${{ needs.live.outputs.network }}
+          LIVE_ABI: ${{ needs.live.outputs.abi }}
+          RETRY_DRIFT: ${{ needs.retry.outputs.drift }}
+          RETRY_NETWORK: ${{ needs.retry.outputs.network }}
+          RETRY_ABI: ${{ needs.retry.outputs.abi }}
           SHA: ${{ github.sha }}
         run: |
           title="Scheduled live checks are failing"
           existing="$(gh issue list --state open --search "in:title \"$title\"" \
             --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)"
 
-          if [ "$JOB_RESULT" = "success" ]; then
+          label() {
+            case "$1" in
+              drift)   printf "Dependency drift against upstream's catalog" ;;
+              network) printf "Network-tagged tests" ;;
+              abi)     printf "ABI smoke test against a published extension" ;;
+              *)       printf "%s" "$1" ;;
+            esac
+          }
+
+          if [ "$LIVE" = "success" ]; then
             if [ -n "$existing" ]; then
               gh issue close "$existing" --comment "Green again: $RUN_URL"
               echo "Closed issue #$existing"
@@ -94,8 +212,35 @@ jobs:
             exit 0
           fi
 
-          body="$(printf 'The scheduled live checks failed: %s\n\n- commit: `%s`\n- workflow: %s\n\nThe steps are the dependency-drift check against upstream, the network-tagged tests and the\nreal-archive ABI smoke test. A failure here means something changed upstream, not that a pull\nrequest broke something; the run log says which step and why.\n' \
-            "$JOB_RESULT" "$SHA" "$RUN_URL")"
+          # A cancelled or skipped attempt is not a verdict about the checks.
+          if [ "$LIVE" != "failure" ]; then
+            echo "Attempt 1 ended as '$LIVE'; not filing"
+            exit 0
+          fi
+
+          failing=""
+          detail=""
+          for check in drift network abi; do
+            upper="$(printf '%s' "$check" | tr 'a-z' 'A-Z')"
+            first_var="LIVE_$upper"
+            second_var="RETRY_$upper"
+            first="${!first_var}"
+            second="${!second_var}"
+            detail="$detail
+          - $(label "$check"): ${first:-skipped}, then ${second:-skipped}"
+            if [ "$first" = "success" ] || [ "$second" = "success" ]; then continue; fi
+            failing="$failing
+          - $(label "$check")"
+          done
+
+          if [ -z "$failing" ]; then
+            echo "Attempt 1 failed and attempt 2 passed: recovered on retry, not filing"
+            { echo "### Recovered on retry"; echo "$detail"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          fi
+
+          body="$(printf 'The live checks failed twice in a row.\n\nFailing:\n%s\n\nAttempts:\n%s\n\n- commit: `%s`\n- workflow: %s\n\nThe checks are the dependency-drift check against upstream, the network-tagged tests\n(the official extension repository, then two of its archives installed and loaded) and the\nreal-archive ABI smoke test. A failure here means something changed upstream, not that a pull\nrequest broke something; the run log says which step and why. A single transient failure does\nnot reach this issue: the failing checks are retried once first.\n' \
+            "$failing" "$detail" "$SHA" "$RUN_URL")"
 
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
