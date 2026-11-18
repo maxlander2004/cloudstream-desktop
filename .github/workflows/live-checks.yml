@@ -59,12 +59,14 @@ jobs:
         run: ./gradlew --console=plain abiSmoke
 
   # A check nobody watches is a check that is allowed to die. A green build stays silent, so a
-  # scheduled failure would otherwise be a red run in a list that nobody opens; this puts it
+  # failure on the schedule (or on a manual dispatch, so the path can be exercised on demand)
+  # would otherwise be a red run in a list that nobody opens; this puts it
   # where somebody will see it. One issue, updated on each failure rather than a new one per
-  # night, and closed automatically once a scheduled run is green again.
+  # night, and closed automatically once a run is green again. Push-triggered runs are silent:
+  # they prove this file, they should not page anyone.
   report:
     needs: live
-    if: always() && github.event_name == 'schedule'
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
